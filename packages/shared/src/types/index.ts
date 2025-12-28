@@ -1,12 +1,14 @@
 // Database types
 export interface Account {
   id: string;
+  clerk_user_id: string;
   name: string;
   email: string;
   subscription_status: 'trial' | 'active' | 'cancelled' | 'expired';
   subscription_ends_at: string | null;
   stripe_customer_id: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface ThreadsAccount {
@@ -18,6 +20,7 @@ export interface ThreadsAccount {
   token_expires_at: string | null;
   is_active: boolean;
   created_at: string;
+  updated_at: string;
 }
 
 export interface VoiceExample {
@@ -53,7 +56,9 @@ export interface Friend {
   account_id: string;
   username: string;
   mode: 'banter' | 'roast';
+  notes: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface FocusedPost {
@@ -64,6 +69,7 @@ export interface FocusedPost {
   post_text: string | null;
   is_active: boolean;
   created_at: string;
+  updated_at: string;
 }
 
 export interface ScheduledPost {
@@ -77,6 +83,7 @@ export interface ScheduledPost {
   posted_id: string | null;
   error_message: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface ReplyHistory {
@@ -86,11 +93,30 @@ export interface ReplyHistory {
   original_reply_id: string;
   original_username: string | null;
   original_text: string | null;
-  classification: string | null;
+  parent_post_id: string | null;
+  classification: 'friendly' | 'neutral' | 'hostile' | 'skip' | null;
+  classification_confidence: number | null;
   our_response: string | null;
+  our_response_id: string | null;
   was_posted: boolean;
   posted_at: string | null;
+  skip_reason: string | null;
+  processing_time_ms: number | null;
+  model_used: string | null;
   created_at: string;
+}
+
+export interface VoiceDocument {
+  id: string;
+  account_id: string;
+  filename: string;
+  storage_path: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  chunks_processed: number;
+  examples_created: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // API response types
