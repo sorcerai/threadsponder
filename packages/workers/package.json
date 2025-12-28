@@ -1,0 +1,23 @@
+{
+  "name": "@threadsponder/workers",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@threadsponder/shared": "workspace:*",
+    "bullmq": "^5.30.0",
+    "ioredis": "^5.4.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0"
+  }
+}

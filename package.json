@@ -1,0 +1,20 @@
+{
+  "name": "threadsponder",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "clean": "turbo clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.0",
+    "prettier": "^3.4.0",
+    "eslint": "^9.17.0"
+  }
+}
