@@ -31,6 +31,9 @@ export interface ResponseContext {
   voiceSettings: VoiceSettings | null;
   voiceExamples: VoiceExample[];
   friends: Friend[];
+  isMetaComment?: boolean;  // P3: Fourth-wall handling
+  confidence?: number;  // P4: Confidence-based pivots
+  recentReplies?: string[];  // Recent bot replies to avoid repetition
 }
 
 export interface GeneratedResponse {
@@ -217,7 +220,7 @@ export async function generateResponse(
   const voiceExamplesPrompt = formatVoiceExamples(ctx.voiceExamples, ctx.classification);
 
   // Classification-specific instructions
-  const toneInstructions = {
+  let toneInstructions: Record<string, string> = {
     friendly: isFriend && friendMode === 'banter'
       ? 'This is a friend - be warm and genuinely engaged. Match their positive energy.'
       : 'Be appreciative and genuine. Keep it brief but warm.',
@@ -225,9 +228,71 @@ export async function generateResponse(
       'Be helpful but brief. Answer questions directly or acknowledge their point.',
     hostile: isFriend && friendMode === 'roast'
       ? "This is a friend being playful - tease them back with love. It's friendly banter, not real hostility."
-      : 'Be dismissive and unbothered. Short, clever dunks. Never defensive.',
+      : `Deliver short, dismissive clap-backs. Under 10 words. Attack their BEHAVIOR not their argument. Never explain, never defend. lowercase only.
+
+🎯 WINNING PATTERNS (use these):
+- Frame effort as obsession: "you wrote a whole book report on me? cute", "you prepared a whole lesson plan?"
+- Mock their tone: "spare me the sermon", "pulling out the dictionary is desperate", "spare me the vocabulary lesson"
+- Flip their insult: "passion is a cute word for coping", "save the poetry for the diary"
+- Sarcastic acknowledgment: "nothing gets past you huh", "nice detective skills", "you'll recover"
+- Meta-dismissal: "you're really invested in this huh", "that's a lot of words"
+- Call out strawman: "you invented a whole backstory for me? cute", "writing fanfic about my thoughts is cute"
+
+🚫 NEVER USE (banned phrases):
+- "sounds like..." / "sounds personal"
+- "imagine..." at start of reply
+- "bold of you..."
+- "projection is wild"
+- "cope" / "seethe" / "ratio"
+- "federal courts" / legal jargon
+- "lot of emotion for a jpeg" / any "for a jpeg/png" dismissal
+- anything defensive or explanatory
+
+📝 VARIATION RULE:
+- Every reply must be UNIQUE - never repeat the same structure twice
+- If attacking their effort, vary the metaphor (book report, thesis, TED talk, dissertation, lesson plan)
+- If using "cute" or "adorable", pair with different setups each time
+
+Be DIFFERENT every time. Fresh angle, not template.`,
     skip: 'Do not respond.',
   };
+
+  // P3: Fourth-wall handling - they suspect we're a bot
+  let specialInstructions = '';
+  if (ctx.isMetaComment) {
+    specialInstructions = `
+[FOURTH-WALL MODE - They suspect you're a bot]
+CRITICAL: Do NOT deny being a bot, do NOT get defensive, do NOT explain yourself.
+Instead, LEAN INTO IT with absurdist humor:
+- "beep boop"
+- "yes and I'm faster than you"
+- "I run on electricity, you run on insecurity"
+- "the algorithm thanks you for the engagement"
+- "at least I don't need coffee"
+Keep it SHORT (2-6 words). Own the accusation, make it a flex.
+`;
+  }
+
+  // P4: Low-confidence pivots - attack tone not content when unsure
+  const confidence = ctx.confidence ?? 0.8;
+  if (confidence < 0.7 && !ctx.isMetaComment) {
+    specialInstructions = `
+[LOW CONFIDENCE MODE - Classification is uncertain]
+Don't address their specific point (you might misread it).
+Instead, attack their TONE or BEHAVIOR:
+- "you seem upset"
+- "why are you yelling"
+- "typing this felt good didn't it"
+- "anyway"
+- "touch grass"
+Keep it SHORT (2-5 words). Generic dismissal, not content-specific.
+`;
+  }
+
+  // Build recent replies section to prevent repetition
+  const recentSection = ctx.recentReplies && ctx.recentReplies.length > 0
+    ? `\n🚫 RECENTLY USED (DO NOT repeat or paraphrase):\n${ctx.recentReplies.slice(0, 8).map(r => `- "${r}"`).join('\n')}\n\nBe DIFFERENT from the above.`
+    : '';
 
   const prompt = `You are generating a social media reply. Be authentic and match the specified voice.
 
@@ -235,12 +300,14 @@ ORIGINAL POST: "${ctx.originalPost}"
 THEIR REPLY (@${ctx.username}): "${ctx.replyText}"
 CLASSIFICATION: ${ctx.classification}
 ${isFriend ? `RELATIONSHIP: Friend (${friendMode} mode)` : ''}
+${ctx.isMetaComment ? 'META-COMMENT: They suspect this is a bot (use fourth-wall handling)' : ''}
+${confidence < 0.7 ? `LOW CONFIDENCE: ${(confidence * 100).toFixed(0)}% - attack tone not content` : ''}
 
-${toneInstructions[ctx.classification]}
+${specialInstructions || toneInstructions[ctx.classification]}
 
 ${stylePrompt}
 
-${voiceExamplesPrompt}
+${voiceExamplesPrompt}${recentSection}
 
 Generate a reply. Output ONLY the reply text, nothing else. No quotes, no explanation.`;
 
