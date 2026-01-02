@@ -4,13 +4,14 @@
  * Connect/manage Threads accounts
  */
 
-import { Router, Response } from 'express';
+import express, { Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/auth.js';
+import { ThreadsClient } from '@threadsponder/shared/clients/threads.js';
 
-const router = Router();
+const router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -45,7 +46,7 @@ const connectSchema = z.object({
  */
 router.get('/accounts', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data, error } = await getSupabase()
       .from('threads_accounts')
@@ -68,7 +69,7 @@ router.get('/accounts', async (req, res: Response) => {
  */
 router.post('/connect', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const parsed = connectSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -114,7 +115,7 @@ router.post('/connect', async (req, res: Response) => {
  */
 router.delete('/accounts/:id', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
 
     const { error } = await getSupabase()
@@ -138,7 +139,7 @@ router.delete('/accounts/:id', async (req, res: Response) => {
  */
 router.patch('/accounts/:id/toggle', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
 
     // Get current status

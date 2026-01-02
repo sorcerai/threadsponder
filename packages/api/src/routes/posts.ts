@@ -4,15 +4,34 @@
  * Focused posts and scheduled posts
  */
 
-import { Router, Response } from 'express';
+import express, { Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/auth.js';
+import { ThreadsClient } from '@threadsponder/shared/clients/threads.js';
 
-const router = Router();
+const router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
+
+/**
+ * Decrypt access token stored in database
+ */
+function decryptToken(encrypted: string): string {
+  const [ivHex, encryptedHex] = encrypted.split(':');
+  const iv = Buffer.from(ivHex, 'hex');
+  const decipher = crypto.createDecipheriv(
+    'aes-256-cbc',
+    Buffer.from(ENCRYPTION_KEY, 'hex'),
+    iv
+  );
+  let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
 
 function getSupabase() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -22,7 +41,82 @@ const focusedPostSchema = z.object({
   threadsAccountId: z.string().uuid(),
   postId: z.string().min(1),
   postText: z.string().optional(),
+  // Dual URL format storage
+  permalinkCom: z.string().optional(),  // threads.com/@user/post/shortcode
+  permalinkNet: z.string().optional(),  // threads.net/post/numericId
+  shortcode: z.string().optional(),      // Just the shortcode part
 });
+
+/**
+ * Extract post info from Threads URL
+ * Supports both formats:
+ * - https://www.threads.com/@username/post/SHORTCODE (user-facing)
+ * - https://www.threads.net/post/NUMERICID (API/internal)
+ */
+function extractPostInfo(input: string): {
+  identifier: string;
+  isNumericId: boolean;
+  username?: string;
+  permalinkCom?: string;
+  permalinkNet?: string;
+} | null {
+  if (!input) return null;
+  const trimmed = input.trim();
+
+  // If it's already just numbers (a numeric post ID)
+  if (/^\d+$/.test(trimmed)) {
+    return {
+      identifier: trimmed,
+      isNumericId: true,
+      permalinkNet: `https://www.threads.net/post/${trimmed}`
+    };
+  }
+
+  // threads.com/@username/post/SHORTCODE format
+  const comMatch = trimmed.match(/threads\.com\/@([^\/]+)\/post\/([A-Za-z0-9_-]+)/);
+  if (comMatch) {
+    return {
+      identifier: comMatch[2],
+      isNumericId: false,
+      username: comMatch[1],
+      permalinkCom: `https://www.threads.com/@${comMatch[1]}/post/${comMatch[2]}`
+    };
+  }
+
+  // threads.com/t/SHORTCODE format (short URL - store original, we can't get username from this)
+  const shortUrlMatch = trimmed.match(/threads\.com\/t\/([A-Za-z0-9_-]+)/);
+  if (shortUrlMatch) {
+    return {
+      identifier: shortUrlMatch[1],
+      isNumericId: false,
+      // Store the original /t/ URL as permalinkCom since it works
+      permalinkCom: `https://www.threads.com/t/${shortUrlMatch[1]}`
+    };
+  }
+
+  // threads.net/post/NUMERICID format
+  const netMatch = trimmed.match(/threads\.net\/post\/(\d+)/);
+  if (netMatch) {
+    return {
+      identifier: netMatch[1],
+      isNumericId: true,
+      permalinkNet: `https://www.threads.net/post/${netMatch[1]}`
+    };
+  }
+
+  // Generic /post/ pattern fallback
+  const postMatch = trimmed.match(/\/post\/([A-Za-z0-9_-]+)/);
+  if (postMatch) {
+    const isNumeric = /^\d+$/.test(postMatch[1]);
+    return {
+      identifier: postMatch[1],
+      isNumericId: isNumeric,
+      permalinkNet: isNumeric ? `https://www.threads.net/post/${postMatch[1]}` : undefined
+    };
+  }
+
+  return null;
+}
 
 const scheduledPostSchema = z.object({
   threadsAccountId: z.string().uuid(),
@@ -41,12 +135,13 @@ const scheduledPostSchema = z.object({
  */
 router.get('/focused', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data, error } = await getSupabase()
       .from('focused_posts')
       .select(`
         id, post_id, post_text, is_active, created_at,
+        permalink_com, permalink_net, shortcode,
         threads_accounts (id, threads_username)
       `)
       .eq('account_id', accountId)
@@ -67,25 +162,58 @@ router.get('/focused', async (req, res: Response) => {
  */
 router.post('/focused', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const parsed = focusedPostSchema.safeParse(req.body);
 
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid request body' });
     }
 
-    const { threadsAccountId, postId, postText } = parsed.data;
+    const { threadsAccountId, postId, postText, permalinkCom, permalinkNet, shortcode } = parsed.data;
 
-    // Verify threads account belongs to user
+    // Verify threads account belongs to user and get credentials for API call
     const { data: threadsAccount } = await getSupabase()
       .from('threads_accounts')
-      .select('id')
+      .select('id, threads_user_id, access_token_encrypted')
       .eq('id', threadsAccountId)
       .eq('account_id', accountId)
       .single();
 
     if (!threadsAccount) {
       return res.status(403).json({ error: 'Threads account not found' });
+    }
+
+    // Extract URL info if not provided directly
+    const urlInfo = extractPostInfo(postId);
+    let finalPermalinkCom = permalinkCom || urlInfo?.permalinkCom || null;
+    let finalPermalinkNet = permalinkNet || urlInfo?.permalinkNet || null;
+    let finalShortcode = shortcode || (!urlInfo?.isNumericId ? urlInfo?.identifier : null) || null;
+
+    // If we only have a numeric ID (no permalinkCom), fetch the proper permalink from Threads API
+    const numericId = urlInfo?.isNumericId ? urlInfo.identifier : null;
+    if (!finalPermalinkCom && numericId && threadsAccount.access_token_encrypted) {
+      try {
+        const accessToken = decryptToken(threadsAccount.access_token_encrypted);
+        const client = new ThreadsClient({
+          accessToken,
+          userId: threadsAccount.threads_user_id,
+        });
+
+        const postDetails = await client.getPostDetails(numericId);
+        if (postDetails.success && postDetails.post?.permalink) {
+          // Threads API returns threads.com/@username/post/shortcode format
+          finalPermalinkCom = postDetails.post.permalink;
+          // Extract shortcode from permalink
+          const shortcodeMatch = postDetails.post.permalink.match(/\/post\/([A-Za-z0-9_-]+)/);
+          if (shortcodeMatch) {
+            finalShortcode = shortcodeMatch[1];
+          }
+          console.log(`[Posts] Fetched permalink for post ${numericId}: ${finalPermalinkCom}`);
+        }
+      } catch (apiError) {
+        console.warn(`[Posts] Could not fetch permalink for post ${numericId}:`, apiError);
+        // Continue without permalink - we'll still save what we have
+      }
     }
 
     const { data, error } = await getSupabase()
@@ -95,6 +223,9 @@ router.post('/focused', async (req, res: Response) => {
         threads_account_id: threadsAccountId,
         post_id: postId,
         post_text: postText || null,
+        permalink_com: finalPermalinkCom,
+        permalink_net: finalPermalinkNet,
+        shortcode: finalShortcode,
         is_active: true,
       })
       .select('*')
@@ -115,7 +246,7 @@ router.post('/focused', async (req, res: Response) => {
  */
 router.delete('/focused/:id', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
 
     const { error } = await getSupabase()
@@ -139,7 +270,7 @@ router.delete('/focused/:id', async (req, res: Response) => {
  */
 router.patch('/focused/:id/toggle', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
 
     const { data: current } = await getSupabase()
@@ -180,7 +311,7 @@ router.patch('/focused/:id/toggle', async (req, res: Response) => {
  */
 router.get('/scheduled', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const status = req.query.status as string | undefined;
 
     let query = getSupabase()
@@ -213,7 +344,7 @@ router.get('/scheduled', async (req, res: Response) => {
  */
 router.post('/scheduled', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const parsed = scheduledPostSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -262,7 +393,7 @@ router.post('/scheduled', async (req, res: Response) => {
  */
 router.put('/scheduled/:id', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
     const { content, scheduledFor, mediaUrls } = req.body;
 
@@ -310,7 +441,7 @@ router.put('/scheduled/:id', async (req, res: Response) => {
  */
 router.delete('/scheduled/:id', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
 
     // Check if post is pending

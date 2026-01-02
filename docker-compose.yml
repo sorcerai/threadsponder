@@ -1,38 +1,23 @@
-version: '3.8'
-
 services:
-  # Local Postgres with pgvector (for development only)
-  # In production, use Supabase
-  postgres:
-    image: pgvector/pgvector:pg16
+  api:
+    build:
+      context: .
+      target: api
+    restart: always
+    ports:
+      - "3008:3008"
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: threadsponder
-      POSTGRES_PASSWORD: threadsponder
-      POSTGRES_DB: threadsponder
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U threadsponder"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - PORT=3008
+      - NODE_ENV=production
 
-  # Local Redis (for development only)
-  # In production, use Upstash
-  redis:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  postgres_data:
-  redis_data:
+  workers:
+    build:
+      context: .
+      target: workers
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production

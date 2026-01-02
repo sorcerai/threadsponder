@@ -4,11 +4,11 @@
  * Reply history and dashboard metrics
  */
 
-import { Router, Response } from 'express';
+import express, { Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
-const router = Router();
+const router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -23,7 +23,7 @@ function getSupabase() {
  */
 router.get('/overview', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     // Get counts in parallel
     const [repliesResult, postsResult, friendsResult, examplesResult] = await Promise.all([

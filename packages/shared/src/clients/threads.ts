@@ -125,6 +125,48 @@ export class ThreadsClient {
   }
 
   /**
+   * Get details for a specific post by ID (including permalink)
+   */
+  async getPostDetails(postId: string): Promise<{
+    success: boolean;
+    post?: {
+      id: string;
+      text: string;
+      timestamp: string;
+      mediaType: string;
+      permalink: string;
+    };
+    error?: string;
+  }> {
+    try {
+      const response = await this.api.get(`/${postId}`, {
+        params: {
+          fields: 'id,text,timestamp,permalink,media_type,shortcode',
+        },
+      });
+
+      if (response.data) {
+        return {
+          success: true,
+          post: {
+            id: response.data.id,
+            text: response.data.text || '',
+            timestamp: response.data.timestamp,
+            mediaType: response.data.media_type,
+            permalink: response.data.permalink,
+          },
+        };
+      }
+
+      return { success: false, error: 'No data returned' };
+    } catch (error: unknown) {
+      const axiosError = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
+      const errorMsg = axiosError.response?.data?.error?.message || axiosError.message || 'Unknown error';
+      return { success: false, error: errorMsg };
+    }
+  }
+
+  /**
    * Get user's posts
    */
   async getUserPosts(limit = 10): Promise<{
@@ -253,6 +295,66 @@ export class ThreadsClient {
       }
 
       return { success: true, replies: [] };
+    } catch (error: unknown) {
+      const axiosError = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
+      const errorMsg = axiosError.response?.data?.error?.message || axiosError.message || 'Unknown error';
+      return { success: false, error: errorMsg };
+    }
+  }
+
+  /**
+   * Get post metrics/insights from Threads API
+   */
+  async getPostMetrics(postId: string): Promise<{
+    success: boolean;
+    metrics?: {
+      views: number;
+      likes: number;
+      replies: number;
+      reposts: number;
+      quotes: number;
+      shares: number;
+    };
+    error?: string;
+  }> {
+    try {
+      const response = await this.api.get(`/${postId}/insights`, {
+        params: {
+          metric: 'views,likes,replies,reposts,quotes,shares',
+        },
+      });
+
+      if (response.data?.data) {
+        const metrics: Record<string, number> = {
+          views: 0,
+          likes: 0,
+          replies: 0,
+          reposts: 0,
+          quotes: 0,
+          shares: 0,
+        };
+
+        response.data.data.forEach((metric: Record<string, unknown>) => {
+          const values = metric.values as Array<{ value: number }> | undefined;
+          const value = values?.[0]?.value || 0;
+          // API returns 'thread_replies' but we normalize to 'replies'
+          const name = metric.name === 'thread_replies' ? 'replies' : (metric.name as string);
+          if (name in metrics) {
+            metrics[name] = value;
+          }
+        });
+
+        return { success: true, metrics: metrics as {
+          views: number;
+          likes: number;
+          replies: number;
+          reposts: number;
+          quotes: number;
+          shares: number;
+        }};
+      }
+
+      return { success: false, error: 'No metrics data returned' };
     } catch (error: unknown) {
       const axiosError = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
       const errorMsg = axiosError.response?.data?.error?.message || axiosError.message || 'Unknown error';

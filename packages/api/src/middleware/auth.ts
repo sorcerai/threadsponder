@@ -85,7 +85,7 @@ export const authMiddleware = [
         return res.status(500).json({ error: 'Failed to get account' });
       }
 
-      (req as AuthenticatedRequest).auth = {
+      (req as unknown as AuthenticatedRequest).auth = {
         userId: clerkUserId,
         accountId,
       };
@@ -112,7 +112,7 @@ export const optionalAuth = async (
     if (clerkUserId) {
       const accountId = await getOrCreateAccount(clerkUserId);
       if (accountId) {
-        (req as AuthenticatedRequest).auth = {
+        (req as unknown as AuthenticatedRequest).auth = {
           userId: clerkUserId,
           accountId,
         };

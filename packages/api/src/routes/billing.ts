@@ -4,12 +4,12 @@
  * Stripe subscription management
  */
 
-import { Router, Request, Response } from 'express';
+import express, { Request, Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import Stripe from 'stripe';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
-const router = Router();
+const router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -31,7 +31,7 @@ function getSupabase() {
  */
 router.get('/status', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data: account, error } = await getSupabase()
       .from('accounts')
@@ -84,7 +84,7 @@ router.get('/status', async (req, res: Response) => {
  */
 router.post('/checkout/trial', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data: account, error } = await getSupabase()
       .from('accounts')
@@ -147,7 +147,7 @@ router.post('/checkout/trial', async (req, res: Response) => {
  */
 router.post('/checkout/subscribe', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data: account, error } = await getSupabase()
       .from('accounts')
@@ -205,7 +205,7 @@ router.post('/checkout/subscribe', async (req, res: Response) => {
  */
 router.post('/portal', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data: account, error } = await getSupabase()
       .from('accounts')

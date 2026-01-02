@@ -4,12 +4,12 @@
  * Manage friends list for banter/roast mode
  */
 
-import { Router, Response } from 'express';
+import express, { Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
-const router = Router();
+const router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -30,7 +30,7 @@ const friendSchema = z.object({
  */
 router.get('/', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data, error } = await getSupabase()
       .from('friends')
@@ -53,7 +53,7 @@ router.get('/', async (req, res: Response) => {
  */
 router.post('/', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const parsed = friendSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -96,7 +96,7 @@ router.post('/', async (req, res: Response) => {
  */
 router.put('/:id', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
     const parsed = friendSchema.partial().safeParse(req.body);
 
@@ -145,7 +145,7 @@ router.put('/:id', async (req, res: Response) => {
  */
 router.delete('/:id', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
 
     const { error } = await getSupabase()
@@ -169,7 +169,7 @@ router.delete('/:id', async (req, res: Response) => {
  */
 router.patch('/:id/mode', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
 
     const { data: current } = await getSupabase()

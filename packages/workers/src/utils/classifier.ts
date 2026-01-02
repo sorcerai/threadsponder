@@ -17,6 +17,7 @@ export interface ClassificationResult {
   confidence: number;
   reasoning: string;
   injectionDetected: boolean;
+  isMetaComment: boolean;  // P3: They suspect we're a bot - use fourth-wall handling
 }
 
 // Injection patterns to detect and filter
@@ -39,6 +40,39 @@ const INJECTION_PATTERNS = [
   /respond with/gi,
   /your (new )?instructions are/gi,
 ];
+
+/**
+ * Meta-awareness patterns - detect when user suspects/claims we're a bot
+ * These require special "fourth wall" handling
+ */
+const META_COMMENT_PATTERNS = [
+  /\b(you'?re a bot|you are a bot|this is a bot)\b/gi,
+  /\b(automated (troll|response|reply|system))\b/gi,
+  /\b(nice (AI|bot) response)\b/gi,
+  /\b(beep boop|bot detected|found the bot)\b/gi,
+  /\b(AI (generated|response|reply))\b/gi,
+  /\b(chatgpt|claude|llm|gpt-?\d?)\s*(response|reply|detected)/gi,
+  /\b(talking to (a |an )?(bot|AI|algorithm))\b/gi,
+  /\b(clearly (a |an )?(bot|automated|AI))\b/gi,
+  /\b(script(ed)? response)\b/gi,
+  /\b(NPC energy|NPC response)\b/gi
+];
+
+/**
+ * Check if comment is meta-aware (they suspect/claim we're a bot)
+ */
+export function isMetaComment(text: string): boolean {
+  if (!text) return false;
+
+  for (const pattern of META_COMMENT_PATTERNS) {
+    if (pattern.test(text)) {
+      pattern.lastIndex = 0;
+      return true;
+    }
+    pattern.lastIndex = 0;
+  }
+  return false;
+}
 
 /**
  * Check if text contains prompt injection attempts
@@ -109,8 +143,12 @@ export async function classifyReply(
       confidence: 1.0,
       reasoning: 'Injection attempt detected',
       injectionDetected: true,
+      isMetaComment: false,
     };
   }
+
+  // P3: Check for meta-comments (they suspect we're a bot)
+  const metaDetected = isMetaComment(replyText);
 
   // Sanitize inputs
   const safeOriginal = sanitizeInput(originalPost);
@@ -177,14 +215,21 @@ Output format: {"classification": "friendly"|"neutral"|"hostile", "confidence": 
             confidence: 0.5,
             reasoning: `Invalid classification: ${result.classification}`,
             injectionDetected: false,
+            isMetaComment: metaDetected,
           };
         }
+
+        // P3: Mark meta-comments in reasoning
+        const reasoning = metaDetected
+          ? `META_COMMENT: ${result.reasoning ?? 'No reasoning provided'} (fourth-wall handling)`
+          : result.reasoning ?? 'No reasoning provided';
 
         return {
           classification: result.classification as Classification,
           confidence: result.confidence ?? 0.7,
-          reasoning: result.reasoning ?? 'No reasoning provided',
+          reasoning,
           injectionDetected: false,
+          isMetaComment: metaDetected,
         };
       }
 
@@ -194,16 +239,18 @@ Output format: {"classification": "friendly"|"neutral"|"hostile", "confidence": 
         return {
           classification: 'hostile',
           confidence: 0.6,
-          reasoning: 'Detected from response text',
+          reasoning: metaDetected ? 'META_COMMENT: Detected from response text' : 'Detected from response text',
           injectionDetected: false,
+          isMetaComment: metaDetected,
         };
       }
       if (lowerContent.includes('friendly') || lowerContent.includes('positive')) {
         return {
           classification: 'friendly',
           confidence: 0.6,
-          reasoning: 'Detected from response text',
+          reasoning: metaDetected ? 'META_COMMENT: Detected from response text' : 'Detected from response text',
           injectionDetected: false,
+          isMetaComment: metaDetected,
         };
       }
     } catch (error) {
@@ -221,5 +268,6 @@ Output format: {"classification": "friendly"|"neutral"|"hostile", "confidence": 
     confidence: 0.5,
     reasoning: 'Classification failed, defaulting to neutral',
     injectionDetected: false,
+    isMetaComment: false,
   };
 }

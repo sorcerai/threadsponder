@@ -4,12 +4,12 @@
  * Voice training examples and settings
  */
 
-import { Router, Response } from 'express';
+import express, { Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
-const router = Router();
+const router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -46,7 +46,7 @@ const settingsSchema = z.object({
  */
 router.get('/examples', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const tone = req.query.tone as string | undefined;
 
     let query = getSupabase()
@@ -76,7 +76,7 @@ router.get('/examples', async (req, res: Response) => {
  */
 router.post('/examples', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const parsed = exampleSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -115,7 +115,7 @@ router.post('/examples', async (req, res: Response) => {
  */
 router.delete('/examples/:id', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
 
     const { error } = await getSupabase()
@@ -139,7 +139,7 @@ router.delete('/examples/:id', async (req, res: Response) => {
  */
 router.get('/settings', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data, error } = await getSupabase()
       .from('voice_settings')
@@ -178,7 +178,7 @@ router.get('/settings', async (req, res: Response) => {
  */
 router.put('/settings', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const parsed = settingsSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -213,7 +213,7 @@ router.put('/settings', async (req, res: Response) => {
  */
 router.get('/documents', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
 
     const { data, error } = await getSupabase()
       .from('voice_documents')
@@ -237,7 +237,7 @@ router.get('/documents', async (req, res: Response) => {
  */
 router.post('/documents', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { filename, storagePath } = req.body;
 
     if (!filename || !storagePath) {
@@ -278,7 +278,7 @@ router.post('/documents', async (req, res: Response) => {
  */
 router.post('/test', async (req, res: Response) => {
   try {
-    const { accountId } = (req as AuthenticatedRequest).auth;
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { originalPost, replyText, classification } = req.body;
 
     if (!originalPost || !replyText) {

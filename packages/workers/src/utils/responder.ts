@@ -9,6 +9,7 @@
 
 import type { VoiceSettings, VoiceExample, Friend } from '@threadsponder/shared';
 import type { Classification } from './classifier.js';
+import type { AttackVector } from './insecurity-provider.js';
 
 // OpenRouter config
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -34,6 +35,7 @@ export interface ResponseContext {
   isMetaComment?: boolean;  // P3: Fourth-wall handling
   confidence?: number;  // P4: Confidence-based pivots
   recentReplies?: string[];  // Recent bot replies to avoid repetition
+  attackVector?: AttackVector | null;  // P0: Loser Dossier attack angle
 }
 
 export interface GeneratedResponse {
@@ -289,6 +291,17 @@ Keep it SHORT (2-5 words). Generic dismissal, not content-specific.
 `;
   }
 
+  // P0: Attack vector injection from Loser Dossier
+  // Uses tracked desperation metrics to personalize attacks
+  let attackVectorPrompt = '';
+  if (ctx.classification === 'hostile' && ctx.attackVector && ctx.attackVector.archetype !== 'NORMIE') {
+    attackVectorPrompt = `
+[LOSER DOSSIER - PERSONALIZED ATTACK]
+${ctx.attackVector.prompt}
+PRIORITY: This psychological weakness overrides generic hostile replies.
+`;
+  }
+
   // Build recent replies section to prevent repetition
   const recentSection = ctx.recentReplies && ctx.recentReplies.length > 0
     ? `\n🚫 RECENTLY USED (DO NOT repeat or paraphrase):\n${ctx.recentReplies.slice(0, 8).map(r => `- "${r}"`).join('\n')}\n\nBe DIFFERENT from the above.`
@@ -299,12 +312,13 @@ Keep it SHORT (2-5 words). Generic dismissal, not content-specific.
 ORIGINAL POST: "${ctx.originalPost}"
 THEIR REPLY (@${ctx.username}): "${ctx.replyText}"
 CLASSIFICATION: ${ctx.classification}
+${ctx.attackVector && ctx.attackVector.archetype !== 'NORMIE' ? `DOSSIER: ${ctx.attackVector.archetype} (${ctx.attackVector.data})` : ''}
 ${isFriend ? `RELATIONSHIP: Friend (${friendMode} mode)` : ''}
 ${ctx.isMetaComment ? 'META-COMMENT: They suspect this is a bot (use fourth-wall handling)' : ''}
 ${confidence < 0.7 ? `LOW CONFIDENCE: ${(confidence * 100).toFixed(0)}% - attack tone not content` : ''}
 
 ${specialInstructions || toneInstructions[ctx.classification]}
-
+${attackVectorPrompt}
 ${stylePrompt}
 
 ${voiceExamplesPrompt}${recentSection}
