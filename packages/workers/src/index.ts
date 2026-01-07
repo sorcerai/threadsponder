@@ -15,6 +15,11 @@ import {
   replyMonitorQueue,
   scheduleMonitoringJobs,
 } from './jobs/reply-monitor.js';
+import {
+  metricsCollectorWorker,
+  metricsCollectorQueue,
+  scheduleMetricsJobs,
+} from './jobs/metrics-collector.js';
 
 const REDIS_URL = process.env.UPSTASH_REDIS_URL || 'redis://localhost:6379';
 
@@ -95,6 +100,16 @@ cron.schedule('* * * * *', async () => {
   // Add jobs for each
 });
 
+// Schedule metrics collection every 5 minutes
+cron.schedule('*/5 * * * *', async () => {
+  console.log('[Scheduler] Running metrics collection scheduling...');
+  try {
+    await scheduleMetricsJobs();
+  } catch (error) {
+    console.error('[Scheduler] Failed to schedule metrics jobs:', error);
+  }
+});
+
 console.log('[Workers] All workers started');
 console.log('[Workers] Cron schedulers running');
 
@@ -104,6 +119,7 @@ async function shutdown() {
   await replyMonitorWorker.close();
   await postSchedulerWorker.close();
   await voiceProcessorWorker.close();
+  await metricsCollectorWorker.close();
   await connection.quit();
   process.exit(0);
 }
@@ -112,4 +128,4 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 // Export for testing
-export { replyMonitorQueue, replyMonitorWorker };
+export { replyMonitorQueue, replyMonitorWorker, metricsCollectorQueue, metricsCollectorWorker };

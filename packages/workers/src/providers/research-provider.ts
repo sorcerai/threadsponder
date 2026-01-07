@@ -1,101 +1,76 @@
 /**
- * Sniper RAG System - Research Provider (Threadsponder Version)
+ * Sniper RAG System - Research Provider (Threadsponder SaaS Version)
  *
- * Uses OpenRouter embeddings (qwen/qwen3-embedding-8b) and DragonflyDB vector search
- * to retrieve "ammunition" for weaponizing replies with facts.
+ * Uses OpenRouter embeddings (qwen/qwen3-embedding-8b) and Supabase pgvector
+ * for semantic search of "ammunition" facts.
  *
- * Optimizations:
+ * Architecture:
+ * - Supabase pgvector: Vector storage and similarity search (persistent, tenant-isolated)
+ * - Upstash Redis: Embedding cache (ephemeral, 24h TTL)
+ * - OpenRouter: Embedding generation (qwen3-embedding-8b)
+ *
+ * Features:
+ * - Hybrid search (BM25 + Dense) via Supabase function
  * - Embedding cache with Redis (24h TTL)
  * - Query transformation for hostile comments
- * - Hybrid search (BM25 + Dense) with RRF fusion
- * - Adaptive topK filtering
- * - Embedding-based reranking
  * - Killer fact extraction
+ * - Multi-tenant isolation via account_id
  */
 
-import Redis from 'ioredis';
 import OpenAI from 'openai';
-import { randomUUID, createHash } from 'crypto';
+import { createHash } from 'crypto';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { logger } from '../utils/shared-logger.js';
-import { rerankWithEmbeddings, RerankedResult } from '../utils/embedding-reranker.js';
+import { rerankWithEmbeddings } from '../utils/embedding-reranker.js';
+import { getRedisClient } from '@threadsponder/shared';
 
 // Embedding cache configuration
 const EMBEDDING_CACHE_TTL = 86400; // 24 hours
-const EMBEDDING_CACHE_PREFIX = 'embed:';
-
-// Jina AI Reader for URL extraction
-const JINA_READER_URL = 'https://r.jina.ai/';
 
 // Embedding configuration
 const EMBEDDING_MODEL = 'qwen/qwen3-embedding-8b';
-const EMBEDDING_DIM = 1024; // Flexible: 32-4096, using 1024 for balance
-const VECTOR_INDEX_NAME = 'idx:ammo';
-const AMMO_PREFIX = 'ammo:';
+const EMBEDDING_DIM = 1024;
+
+// Jina AI Reader for URL extraction
+const JINA_READER_URL = 'https://r.jina.ai/';
 
 // Chunk settings
 const CHUNK_SIZE = 500;
 const CHUNK_OVERLAP = 50;
 
-interface AmmoChunk {
-  content: string;
-  source: string;
-  chunkId: number;
-}
-
 interface SearchResult {
   content: string;
   source: string;
   score: number;
+  title?: string;
+  category?: string;
 }
 
-// Ingestion job tracking
-interface IngestionJob {
+interface AmmunitionRow {
   id: string;
-  type: 'url' | 'file' | 'text';
-  source: string;
-  sourceName: string;
-  status: 'queued' | 'processing' | 'completed' | 'failed';
-  progress: {
-    total: number;
-    processed: number;
-    percentage: number;
-  };
-  errors: string[];
-  startedAt: string;
-  completedAt?: string;
-  chunksIngested: number;
+  content: string;
+  title: string | null;
+  source: string | null;
+  category: string | null;
+  similarity?: number;
+  vector_score?: number;
+  keyword_score?: number;
+  hybrid_score?: number;
 }
-
-// Source metadata
-interface SourceMetadata {
-  sourceName: string;
-  keywords: string[];
-  keyFacts: string[];
-  category: string;
-  chunkCount: number;
-  lastUpdated: string;
-}
-
-// Job queue keys
-const JOB_KEYS = {
-  job: (jobId: string) => `ingest:job:${jobId}`,
-  progress: (jobId: string) => `ingest:progress:${jobId}`,
-  errors: (jobId: string) => `ingest:errors:${jobId}`,
-  queue: 'ingest:queue',
-  active: 'ingest:active',
-  sourceMetadata: (sourceName: string) => `ammo:meta:${sourceName.toLowerCase()}`
-};
 
 export class ResearchProvider {
-  private redis: Redis;
+  private supabase: SupabaseClient;
   private openrouter: OpenAI;
-  private indexCreated: boolean = false;
 
   constructor() {
-    this.redis = new Redis({
-      host: process.env.DRAGONFLY_HOST || 'localhost',
-      port: parseInt(process.env.DRAGONFLY_PORT || '6379'),
-    });
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error('SUPABASE_URL and SUPABASE_SERVICE_KEY are required for ResearchProvider');
+    }
+
+    this.supabase = createClient(supabaseUrl, supabaseKey);
 
     this.openrouter = new OpenAI({
       apiKey: process.env.OPENROUTER_API_KEY!,
@@ -106,17 +81,11 @@ export class ResearchProvider {
       }
     });
 
-    this.redis.on('connect', () => {
-      logger.info('ResearchProvider connected to DragonflyDB');
-    });
-
-    this.redis.on('error', (err) => {
-      logger.error('DragonflyDB connection error:', err);
-    });
+    logger.info('ResearchProvider initialized with Supabase pgvector');
   }
 
   /**
-   * Generate embedding using OpenRouter's qwen3-embedding-8b model (direct API call)
+   * Generate embedding using OpenRouter's qwen3-embedding-8b model
    */
   private async getEmbeddingFromAPI(text: string): Promise<number[]> {
     const response = await this.openrouter.embeddings.create({
@@ -129,8 +98,36 @@ export class ResearchProvider {
   }
 
   /**
+   * Get embedding with Upstash Redis caching (24h TTL)
+   */
+  async getEmbedding(text: string): Promise<number[]> {
+    try {
+      const hash = createHash('md5').update(text).digest('hex');
+      const cacheKey = `embed:${hash}`;
+      const redis = getRedisClient();
+
+      const cached = await redis.get<number[]>(cacheKey);
+      if (cached) {
+        logger.debug(`Embedding cache HIT: ${hash.substring(0, 8)}...`);
+        return cached;
+      }
+
+      logger.debug(`Embedding cache MISS: ${hash.substring(0, 8)}... - calling API`);
+      const embedding = await this.getEmbeddingFromAPI(text);
+
+      await redis.set(cacheKey, embedding, { ex: EMBEDDING_CACHE_TTL });
+      logger.debug(`Embedding cached: ${hash.substring(0, 8)}... (TTL: ${EMBEDDING_CACHE_TTL}s)`);
+
+      return embedding;
+    } catch (error) {
+      logger.error('Embedding generation failed:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Transform hostile comment into searchable query
-   * Extracts topic keywords to improve semantic matching with knowledge base
+   * Extracts topic keywords to improve semantic matching
    */
   async transformQueryForSearch(hostileComment: string): Promise<string> {
     try {
@@ -181,7 +178,7 @@ export class ResearchProvider {
       'skynet': ['AI safety', 'existential risk', 'sci-fi'],
 
       // AI Capabilities
-      'can\'t create': ['creativity', 'AI capabilities', 'originality'],
+      "can't create": ['creativity', 'AI capabilities', 'originality'],
       'not creative': ['creativity', 'AI capabilities', 'innovation'],
       'just pattern': ['pattern matching', 'understanding', 'intelligence'],
       'real artist': ['human artist', 'creativity', 'authenticity'],
@@ -218,7 +215,7 @@ export class ResearchProvider {
       }
     });
 
-    // Extract capitalized words
+    // Extract capitalized words (proper nouns)
     const capitalWords = text.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b/g) || [];
     capitalWords.forEach(word => {
       if (word.length > 2 && !['The', 'This', 'That', 'What', 'Why', 'How', 'You', 'Your'].includes(word)) {
@@ -238,348 +235,110 @@ export class ResearchProvider {
   }
 
   /**
-   * Get embedding with Redis caching (24h TTL)
+   * Search for ammunition using Supabase pgvector hybrid search
+   * Tenant-isolated via account_id
    */
-  async getEmbedding(text: string): Promise<number[]> {
-    try {
-      const hash = createHash('md5').update(text).digest('hex');
-      const cacheKey = `${EMBEDDING_CACHE_PREFIX}${hash}`;
-
-      const cached = await this.redis.get(cacheKey);
-      if (cached) {
-        logger.debug(`Embedding cache HIT: ${hash.substring(0, 8)}...`);
-        return JSON.parse(cached);
-      }
-
-      logger.debug(`Embedding cache MISS: ${hash.substring(0, 8)}... - calling API`);
-      const embedding = await this.getEmbeddingFromAPI(text);
-
-      await this.redis.setex(cacheKey, EMBEDDING_CACHE_TTL, JSON.stringify(embedding));
-      logger.debug(`Embedding cached: ${hash.substring(0, 8)}... (TTL: ${EMBEDDING_CACHE_TTL}s)`);
-
-      return embedding;
-    } catch (error) {
-      logger.error('Embedding generation failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Initialize DragonflyDB vector index
-   */
-  async initVectorIndex(): Promise<void> {
-    if (this.indexCreated) return;
-
-    try {
-      try {
-        await this.redis.call('FT.INFO', VECTOR_INDEX_NAME);
-        logger.info('Vector index already exists');
-        this.indexCreated = true;
-        return;
-      } catch (e) {
-        // Index doesn't exist, create it
-      }
-
-      await this.redis.call(
-        'FT.CREATE', VECTOR_INDEX_NAME,
-        'ON', 'JSON',
-        'PREFIX', '1', AMMO_PREFIX,
-        'SCHEMA',
-        '$.vector', 'AS', 'vector', 'VECTOR', 'HNSW', '6',
-        'TYPE', 'FLOAT32', 'DIM', String(EMBEDDING_DIM), 'DISTANCE_METRIC', 'COSINE',
-        '$.content', 'AS', 'content', 'TEXT',
-        '$.source', 'AS', 'source', 'TEXT'
-      );
-
-      logger.info('Created vector index: ' + VECTOR_INDEX_NAME);
-      this.indexCreated = true;
-    } catch (error: any) {
-      if (error.message?.includes('Index already exists')) {
-        logger.info('Vector index already exists');
-        this.indexCreated = true;
-      } else {
-        logger.error('Failed to create vector index:', error);
-        throw error;
-      }
-    }
-  }
-
-  /**
-   * Simple text chunking
-   */
-  private chunkText(text: string): string[] {
-    const chunks: string[] = [];
-    let start = 0;
-
-    while (start < text.length) {
-      const end = Math.min(start + CHUNK_SIZE, text.length);
-      const chunk = text.slice(start, end).trim();
-      if (chunk.length > 0) {
-        chunks.push(chunk);
-      }
-      const nextStart = end - CHUNK_OVERLAP;
-      start = nextStart > start ? nextStart : start + CHUNK_SIZE;
-    }
-
-    return chunks.filter(c => c.length > 20);
-  }
-
-  /**
-   * BM25 keyword search using DragonflyDB FT.SEARCH with TEXT
-   */
-  private async bm25Search(query: string, topK: number = 10): Promise<SearchResult[]> {
-    try {
-      const keywords = query.split(/\s+/).filter(w => w.length > 2);
-      if (keywords.length === 0) return [];
-
-      const searchQuery = keywords.map(k => k.replace(/[^a-zA-Z0-9]/g, '')).join('|');
-
-      const results = await this.redis.call(
-        'FT.SEARCH', VECTOR_INDEX_NAME,
-        `@content:(${searchQuery})`,
-        'RETURN', '2', 'content', 'source',
-        'LIMIT', '0', String(topK)
-      ) as any[];
-
-      const searchResults: SearchResult[] = [];
-
-      if (results && results.length > 1) {
-        for (let i = 1; i < results.length; i += 2) {
-          const fields = results[i + 1];
-          if (fields) {
-            const result: SearchResult = { content: '', source: '', score: 0 };
-
-            for (let j = 0; j < fields.length; j += 2) {
-              const key = fields[j];
-              const value = fields[j + 1];
-              if (key === 'content') result.content = value;
-              if (key === 'source') result.source = value;
-            }
-
-            result.score = 1 - (searchResults.length / topK);
-            searchResults.push(result);
-          }
-        }
-      }
-
-      logger.info(`BM25 search found ${searchResults.length} results for "${searchQuery.substring(0, 30)}..."`);
-      return searchResults;
-
-    } catch (error) {
-      logger.warn('BM25 search failed, returning empty:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Reciprocal Rank Fusion (RRF) to combine dense and sparse search results
-   */
-  private reciprocalRankFusion(
-    denseResults: SearchResult[],
-    sparseResults: SearchResult[],
-    k: number = 60
-  ): SearchResult[] {
-    const scores = new Map<string, { score: number; result: SearchResult }>();
-
-    denseResults.forEach((r, i) => {
-      const key = r.content.substring(0, 100);
-      const current = scores.get(key);
-      const rrfScore = 1 / (k + i + 1);
-
-      if (current) {
-        current.score += rrfScore;
-      } else {
-        scores.set(key, { score: rrfScore, result: r });
-      }
-    });
-
-    sparseResults.forEach((r, i) => {
-      const key = r.content.substring(0, 100);
-      const current = scores.get(key);
-      const rrfScore = 1 / (k + i + 1);
-
-      if (current) {
-        current.score += rrfScore;
-      } else {
-        scores.set(key, { score: rrfScore, result: r });
-      }
-    });
-
-    const fused = Array.from(scores.values())
-      .sort((a, b) => b.score - a.score)
-      .map(({ score, result }) => ({
-        ...result,
-        score
-      }));
-
-    logger.info(`RRF fusion: ${denseResults.length} dense + ${sparseResults.length} sparse → ${fused.length} unique results`);
-    return fused;
-  }
-
-  /**
-   * Hybrid search combining dense vector and BM25 sparse search with RRF fusion
-   */
-  async hybridSearchAmmo(query: string, topK: number = 5): Promise<SearchResult[]> {
-    await this.initVectorIndex();
-
+  async searchAmmo(accountId: string, query: string, topK: number = 3): Promise<SearchResult[]> {
     try {
       const transformedQuery = await this.transformQueryForSearch(query);
+      const queryEmbedding = await this.getEmbedding(transformedQuery);
 
-      const [denseResults, sparseResults] = await Promise.all([
-        this.vectorSearchAmmo(transformedQuery, topK * 2),
-        this.bm25Search(transformedQuery, topK * 2)
-      ]);
+      // Use Supabase's hybrid_search_ammunition function
+      const { data, error } = await this.supabase.rpc('hybrid_search_ammunition', {
+        p_account_id: accountId,
+        p_query: transformedQuery,
+        p_embedding: queryEmbedding,
+        p_alpha: 0.7, // 70% vector, 30% keyword
+        p_limit: topK * 2 // Over-fetch for reranking
+      });
 
-      const fusedResults = this.reciprocalRankFusion(denseResults, sparseResults, 60);
-
-      return fusedResults.slice(0, topK);
-
-    } catch (error) {
-      logger.error('Hybrid search failed:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Vector-only search (internal, used by hybrid search)
-   */
-  private async vectorSearchAmmo(query: string, topK: number = 3): Promise<SearchResult[]> {
-    try {
-      const queryEmbed = await this.getEmbedding(query);
-
-      const vectorBuffer = Buffer.from(new Float32Array(queryEmbed).buffer);
-
-      const results = await this.redis.call(
-        'FT.SEARCH', VECTOR_INDEX_NAME,
-        `*=>[KNN ${topK} @vector $vec AS score]`,
-        'PARAMS', '2', 'vec', vectorBuffer,
-        'RETURN', '3', 'content', 'source', 'score',
-        'SORTBY', 'score', 'ASC',
-        'DIALECT', '2'
-      ) as any[];
-
-      const searchResults: SearchResult[] = [];
-
-      if (results && results.length > 1) {
-        for (let i = 1; i < results.length; i += 2) {
-          const fields = results[i + 1];
-          if (fields) {
-            const result: SearchResult = { content: '', source: '', score: 0 };
-
-            for (let j = 0; j < fields.length; j += 2) {
-              const key = fields[j];
-              const value = fields[j + 1];
-              if (key === 'content') result.content = value;
-              if (key === 'source') result.source = value;
-              if (key === 'score') result.score = parseFloat(value);
-            }
-
-            searchResults.push(result);
-          }
-        }
+      if (error) {
+        logger.error('Hybrid search error:', error);
+        // Fall back to vector-only search
+        return this.vectorOnlySearch(accountId, queryEmbedding, topK);
       }
 
-      return searchResults;
+      if (!data || data.length === 0) {
+        logger.info('No ammunition found for query');
+        return [];
+      }
+
+      // Convert to SearchResult format
+      const results: SearchResult[] = (data as AmmunitionRow[]).map(row => ({
+        content: row.content,
+        source: row.source || 'unknown',
+        title: row.title || undefined,
+        category: row.category || undefined,
+        score: row.hybrid_score || row.similarity || 0
+      }));
+
+      // Rerank using embeddings
+      const reranked = await this.rerankResults(query, results, topK);
+      logger.info(`Hybrid search: ${results.length} results → ${reranked.length} after reranking`);
+      return reranked;
 
     } catch (error) {
-      logger.error('Vector search failed:', error);
+      logger.error('Ammunition search failed:', error);
       return [];
     }
   }
 
   /**
-   * Apply adaptive topK filtering based on score quality
+   * Vector-only search fallback using Supabase
    */
-  private filterByScoreQuality(
-    results: SearchResult[],
-    maxResults: number = 3
-  ): SearchResult[] {
-    if (results.length === 0) return [];
+  private async vectorOnlySearch(accountId: string, embedding: number[], topK: number): Promise<SearchResult[]> {
+    try {
+      const { data, error } = await this.supabase.rpc('search_ammunition', {
+        p_account_id: accountId,
+        p_embedding: embedding,
+        p_limit: topK
+      });
 
-    const topScore = results[0].score;
-    const isRRFScore = topScore < 0.1;
+      if (error) {
+        logger.error('Vector search error:', error);
+        return [];
+      }
 
-    const threshold = isRRFScore
-      ? topScore * 0.5
-      : 0.6;
-
-    const goodResults = results.filter(r => r.score >= threshold);
-
-    if (goodResults.length === 0) {
-      logger.warn(`Low confidence ammunition retrieval (top score: ${topScore.toFixed(4)})`);
-      return results.slice(0, 1);
+      return (data as AmmunitionRow[]).map(row => ({
+        content: row.content,
+        source: row.source || 'unknown',
+        title: row.title || undefined,
+        category: row.category || undefined,
+        score: row.similarity || 0
+      }));
+    } catch (error) {
+      logger.error('Vector-only search failed:', error);
+      return [];
     }
-
-    const filtered = goodResults.slice(0, maxResults);
-    logger.info(`Adaptive filtering: ${results.length} → ${filtered.length} results (threshold: ${threshold.toFixed(4)})`);
-    return filtered;
   }
 
   /**
-   * Rerank search results using query-document embedding similarity
+   * Rerank results using query-document embedding similarity
    */
-  private async rerankSearchResults(
-    query: string,
-    results: SearchResult[],
-    topK: number
-  ): Promise<SearchResult[]> {
+  private async rerankResults(query: string, results: SearchResult[], topK: number): Promise<SearchResult[]> {
     if (results.length <= 1) return results;
 
     try {
       const queryEmbedding = await this.getEmbedding(query);
-
       const docEmbeddings = new Map<string, number[]>();
-      const embedPromises = results.map(async (r) => {
+
+      await Promise.all(results.map(async (r) => {
         const embedding = await this.getEmbedding(r.content.substring(0, 500));
         docEmbeddings.set(r.content, embedding);
-      });
-      await Promise.all(embedPromises);
+      }));
 
       const reranked = rerankWithEmbeddings(queryEmbedding, results, docEmbeddings, 0.3);
 
       return reranked.slice(0, topK).map(r => ({
         content: r.content,
         source: r.source,
+        title: r.title,
+        category: r.category,
         score: r.combinedScore
       }));
-
     } catch (error) {
       logger.warn('Reranking failed, using original order:', error);
       return results.slice(0, topK);
-    }
-  }
-
-  /**
-   * Search for relevant ammunition based on query
-   * Uses hybrid search with query transformation, reranking, and adaptive filtering
-   */
-  async searchAmmo(query: string, topK: number = 3): Promise<SearchResult[]> {
-    await this.initVectorIndex();
-
-    try {
-      const overFetchK = Math.min(topK * 4, 20);
-
-      const results = await this.hybridSearchAmmo(query, overFetchK);
-
-      if (results.length > 0) {
-        const reranked = await this.rerankSearchResults(query, results, topK * 2);
-        const filtered = this.filterByScoreQuality(reranked, topK);
-        logger.info(`Hybrid→Rerank→Filter: ${results.length}→${reranked.length}→${filtered.length} ammunition`);
-        return filtered;
-      }
-
-      logger.info('Hybrid search empty, falling back to vector-only');
-      const transformedQuery = await this.transformQueryForSearch(query);
-      const fallbackResults = await this.vectorSearchAmmo(transformedQuery, overFetchK);
-
-      const reranked = await this.rerankSearchResults(query, fallbackResults, topK * 2);
-      const filtered = this.filterByScoreQuality(reranked, topK);
-      logger.info(`Vector fallback→Rerank→Filter: ${fallbackResults.length}→${reranked.length}→${filtered.length}`);
-      return filtered;
-
-    } catch (error) {
-      logger.error('Ammo search failed:', error);
-      return [];
     }
   }
 
@@ -688,78 +447,63 @@ INSTRUCTION: Pick the BEST fact above to destroy their argument.
   }
 
   /**
-   * Ingest from raw text content
+   * Simple text chunking
    */
-  async ingestFromText(text: string, sourceName: string, options?: {
-    keywords?: string[];
-    category?: string;
-    keyFacts?: string[];
-  }): Promise<{ jobId: string; chunksIngested: number }> {
-    const jobId = randomUUID();
+  private chunkText(text: string): string[] {
+    const chunks: string[] = [];
+    let start = 0;
 
+    while (start < text.length) {
+      const end = Math.min(start + CHUNK_SIZE, text.length);
+      const chunk = text.slice(start, end).trim();
+      if (chunk.length > 0) {
+        chunks.push(chunk);
+      }
+      const nextStart = end - CHUNK_OVERLAP;
+      start = nextStart > start ? nextStart : start + CHUNK_SIZE;
+    }
+
+    return chunks.filter(c => c.length > 20);
+  }
+
+  /**
+   * Ingest ammunition from raw text content
+   * Stores in Supabase with pgvector embeddings
+   */
+  async ingestFromText(accountId: string, text: string, sourceName: string, options?: {
+    category?: 'legal' | 'statistical' | 'technical' | 'historical' | 'quotation' | 'definition' | 'general';
+    tags?: string[];
+    title?: string;
+  }): Promise<{ chunksIngested: number }> {
     try {
-      const job: IngestionJob = {
-        id: jobId,
-        type: 'text',
-        source: 'direct-text',
-        sourceName,
-        status: 'processing',
-        progress: { total: 0, processed: 0, percentage: 0 },
-        errors: [],
-        startedAt: new Date().toISOString(),
-        chunksIngested: 0
-      };
-      await this.redis.setex(JOB_KEYS.job(jobId), 86400, JSON.stringify(job));
-
       const chunks = this.chunkText(text);
-      job.progress.total = chunks.length;
-
-      await this.initVectorIndex();
-      await this.deleteSource(sourceName);
+      logger.info(`Ingesting ${chunks.length} chunks from "${sourceName}" for account ${accountId}`);
 
       let ingested = 0;
-      for (let i = 0; i < chunks.length; i++) {
-        try {
-          const embedding = await this.getEmbedding(chunks[i]);
+      for (const chunk of chunks) {
+        const embedding = await this.getEmbedding(chunk);
 
-          const key = `${AMMO_PREFIX}${sourceName}:${i}`;
-          await this.redis.call(
-            'JSON.SET', key, '$',
-            JSON.stringify({
-              vector: embedding,
-              content: chunks[i],
-              source: sourceName
-            })
-          );
+        const { error } = await this.supabase.from('ammunition').insert({
+          account_id: accountId,
+          content: chunk,
+          source: sourceName,
+          source_type: 'manual',
+          title: options?.title,
+          category: options?.category || 'general',
+          tags: options?.tags || [],
+          embedding: embedding
+        });
 
+        if (error) {
+          logger.error(`Failed to insert chunk: ${error.message}`);
+        } else {
           ingested++;
-          job.progress.processed = i + 1;
-          job.progress.percentage = Math.round(((i + 1) / chunks.length) * 100);
-
-        } catch (error: any) {
-          job.errors.push(`Chunk ${i}: ${error.message}`);
         }
       }
 
-      // Store metadata
-      const metadata: SourceMetadata = {
-        sourceName,
-        keywords: options?.keywords || [],
-        keyFacts: options?.keyFacts || [],
-        category: options?.category || 'general',
-        chunkCount: ingested,
-        lastUpdated: new Date().toISOString()
-      };
-      await this.redis.set(JOB_KEYS.sourceMetadata(sourceName), JSON.stringify(metadata));
-
-      job.status = 'completed';
-      job.completedAt = new Date().toISOString();
-      job.chunksIngested = ingested;
-      await this.redis.setex(JOB_KEYS.job(jobId), 86400, JSON.stringify(job));
-
-      return { jobId, chunksIngested: ingested };
-
-    } catch (error: any) {
+      logger.info(`Ingested ${ingested}/${chunks.length} chunks for "${sourceName}"`);
+      return { chunksIngested: ingested };
+    } catch (error) {
       logger.error('Text ingestion failed:', error);
       throw error;
     }
@@ -774,9 +518,7 @@ INSTRUCTION: Pick the BEST fact above to destroy their argument.
       logger.info(`Fetching URL via Jina AI: ${url}`);
 
       const response = await fetch(jinaUrl, {
-        headers: {
-          'Accept': 'text/plain'
-        }
+        headers: { 'Accept': 'text/plain' }
       });
 
       if (!response.ok) {
@@ -786,7 +528,6 @@ INSTRUCTION: Pick the BEST fact above to destroy their argument.
       const text = await response.text();
       logger.info(`Extracted ${text.length} chars from URL`);
       return text;
-
     } catch (error) {
       logger.error('URL extraction failed:', error);
       throw error;
@@ -796,101 +537,117 @@ INSTRUCTION: Pick the BEST fact above to destroy their argument.
   /**
    * Ingest content from URL
    */
-  async ingestFromUrl(url: string, sourceName: string, options?: {
-    keywords?: string[];
-    category?: string;
-    keyFacts?: string[];
-  }): Promise<{ jobId: string; chunksIngested: number }> {
+  async ingestFromUrl(accountId: string, url: string, sourceName: string, options?: {
+    category?: 'legal' | 'statistical' | 'technical' | 'historical' | 'quotation' | 'definition' | 'general';
+    tags?: string[];
+    title?: string;
+  }): Promise<{ chunksIngested: number }> {
     const text = await this.extractUrlContent(url);
-    return this.ingestFromText(text, sourceName, options);
+    return this.ingestFromText(accountId, text, sourceName, options);
   }
 
   /**
-   * Get list of all ingested sources
+   * List all sources for an account
    */
-  async listSources(): Promise<string[]> {
-    const keys = await this.redis.keys(`${AMMO_PREFIX}*`);
-    const sources = new Set<string>();
+  async listSources(accountId: string): Promise<string[]> {
+    const { data, error } = await this.supabase
+      .from('ammunition')
+      .select('source')
+      .eq('account_id', accountId)
+      .eq('is_active', true);
 
-    for (const key of keys) {
-      const parts = key.replace(AMMO_PREFIX, '').split(':');
-      if (parts.length >= 1) {
-        sources.add(parts[0]);
-      }
+    if (error) {
+      logger.error('Failed to list sources:', error);
+      return [];
     }
 
+    const sources = new Set<string>();
+    data?.forEach(row => {
+      if (row.source) sources.add(row.source);
+    });
     return Array.from(sources);
   }
 
   /**
-   * Delete all chunks from a source
+   * Delete all ammunition from a source
    */
-  async deleteSource(sourceName: string): Promise<number> {
-    const keys = await this.redis.keys(`${AMMO_PREFIX}${sourceName}:*`);
+  async deleteSource(accountId: string, sourceName: string): Promise<number> {
+    const { data, error } = await this.supabase
+      .from('ammunition')
+      .delete()
+      .eq('account_id', accountId)
+      .eq('source', sourceName)
+      .select('id');
 
-    if (keys.length === 0) return 0;
-
-    const deleted = await this.redis.del(...keys);
-    await this.redis.del(JOB_KEYS.sourceMetadata(sourceName));
-
-    logger.info(`Deleted ${deleted} chunks from source: ${sourceName}`);
-    return deleted;
-  }
-
-  /**
-   * Get embedding cache statistics
-   */
-  async getEmbeddingCacheStats(): Promise<{
-    cacheKeyCount: number;
-    estimatedSizeKB: number;
-  }> {
-    const keys = await this.redis.keys(`${EMBEDDING_CACHE_PREFIX}*`);
-    const estimatedSizeKB = keys.length * 5;
-    return {
-      cacheKeyCount: keys.length,
-      estimatedSizeKB
-    };
-  }
-
-  /**
-   * Clear embedding cache
-   */
-  async clearEmbeddingCache(): Promise<number> {
-    const keys = await this.redis.keys(`${EMBEDDING_CACHE_PREFIX}*`);
-    if (keys.length === 0) return 0;
-    const deleted = await this.redis.del(...keys);
-    logger.info(`Cleared ${deleted} embedding cache entries`);
-    return deleted;
-  }
-
-  /**
-   * Get stats about the vector store
-   */
-  async getStats(): Promise<{
-    totalChunks: number;
-    sources: string[];
-    indexInfo: any;
-  }> {
-    const keys = await this.redis.keys(`${AMMO_PREFIX}*`);
-    const sources = await this.listSources();
-
-    let indexInfo = null;
-    try {
-      indexInfo = await this.redis.call('FT.INFO', VECTOR_INDEX_NAME);
-    } catch (e) {
-      // Index might not exist yet
+    if (error) {
+      logger.error('Failed to delete source:', error);
+      return 0;
     }
 
+    const deleted = data?.length || 0;
+    logger.info(`Deleted ${deleted} ammunition entries from source: ${sourceName}`);
+    return deleted;
+  }
+
+  /**
+   * Get stats about the ammunition store for an account
+   */
+  async getStats(accountId: string): Promise<{
+    totalChunks: number;
+    sources: string[];
+    byCategory: Record<string, number>;
+  }> {
+    const { data, error } = await this.supabase
+      .from('ammunition')
+      .select('id, source, category')
+      .eq('account_id', accountId)
+      .eq('is_active', true);
+
+    if (error) {
+      logger.error('Failed to get stats:', error);
+      return { totalChunks: 0, sources: [], byCategory: {} };
+    }
+
+    const sources = new Set<string>();
+    const byCategory: Record<string, number> = {};
+
+    data?.forEach(row => {
+      if (row.source) sources.add(row.source);
+      const cat = row.category || 'general';
+      byCategory[cat] = (byCategory[cat] || 0) + 1;
+    });
+
     return {
-      totalChunks: keys.length,
-      sources,
-      indexInfo
+      totalChunks: data?.length || 0,
+      sources: Array.from(sources),
+      byCategory
     };
+  }
+
+  /**
+   * Get embedding cache statistics from Upstash Redis
+   */
+  async getEmbeddingCacheStats(): Promise<{
+    estimatedCount: number;
+  }> {
+    // Note: Upstash doesn't support KEYS command efficiently
+    // This is a limitation - we can't easily count cache entries
+    return { estimatedCount: -1 }; // Unknown
+  }
+
+  /**
+   * Clear embedding cache (limited functionality with Upstash)
+   */
+  async clearEmbeddingCache(): Promise<number> {
+    // Upstash doesn't support KEYS * efficiently
+    // Would need to implement with a scan pattern or maintain a set of keys
+    logger.warn('Embedding cache clear not supported with Upstash REST API');
+    return 0;
   }
 
   async close(): Promise<void> {
-    await this.redis.quit();
-    logger.info('ResearchProvider connection closed');
+    // Supabase client doesn't need explicit close
+    logger.info('ResearchProvider closed');
   }
 }
 

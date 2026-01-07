@@ -4,15 +4,26 @@
  * Voice training examples and settings
  */
 
-import express, { Response } from 'express';
+import express, { Response, Router } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
+import { Queue } from 'bullmq';
+import IORedis from 'ioredis';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
-const router = express.Router();
+const router: Router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+const REDIS_URL = process.env.UPSTASH_REDIS_URL || 'redis://localhost:6379';
+
+// BullMQ queue for voice document processing
+const redisConnection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
+const voiceProcessorQueue = new Queue('voice-processor', { connection: redisConnection });
+
+// Constants
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_DOCUMENTS_PER_USER = 20;
 
 function getSupabase() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -231,17 +242,64 @@ router.get('/documents', async (req, res: Response) => {
 });
 
 /**
- * POST /api/voice/documents
- * Upload a document for voice training
- * (Handles file upload and queues processing)
+ * POST /api/voice/documents/upload
+ * Upload a file for voice training (with base64 file data)
  */
-router.post('/documents', async (req, res: Response) => {
+router.post('/documents/upload', async (req, res: Response) => {
   try {
     const { accountId } = (req as unknown as AuthenticatedRequest).auth;
-    const { filename, storagePath } = req.body;
+    const { filename, fileSize, fileData } = req.body;
 
-    if (!filename || !storagePath) {
-      return res.status(400).json({ error: 'filename and storagePath required' });
+    if (!filename || !fileData) {
+      return res.status(400).json({ error: 'filename and fileData required' });
+    }
+
+    // Check file size limit (10MB)
+    if (fileSize && fileSize > MAX_FILE_SIZE) {
+      return res.status(400).json({
+        error: `File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB`
+      });
+    }
+
+    // Check supported file types
+    const ext = filename.split('.').pop()?.toLowerCase();
+    const supportedTypes = ['txt', 'md', 'pdf', 'docx'];
+    if (!ext || !supportedTypes.includes(ext)) {
+      return res.status(400).json({
+        error: `Unsupported file type. Supported: ${supportedTypes.join(', ')}`
+      });
+    }
+
+    // Check document count limit
+    const { count, error: countError } = await getSupabase()
+      .from('voice_documents')
+      .select('*', { count: 'exact', head: true })
+      .eq('account_id', accountId);
+
+    if (countError) throw countError;
+
+    if ((count || 0) >= MAX_DOCUMENTS_PER_USER) {
+      return res.status(400).json({
+        error: `Maximum ${MAX_DOCUMENTS_PER_USER} documents allowed. Delete some to upload more.`
+      });
+    }
+
+    // Decode base64 and upload to Supabase Storage
+    const buffer = Buffer.from(fileData, 'base64');
+    const storagePath = `accounts/${accountId}/documents/${Date.now()}-${filename}`;
+
+    const { error: uploadError } = await getSupabase()
+      .storage
+      .from('voice-documents')
+      .upload(storagePath, buffer, {
+        contentType: ext === 'pdf' ? 'application/pdf' :
+                     ext === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' :
+                     'text/plain',
+      });
+
+    if (uploadError) {
+      console.error('[Voice] Storage upload failed:', uploadError);
+      throw new Error(`Failed to upload file: ${uploadError.message}`);
     }
 
     // Create document record
@@ -258,14 +316,150 @@ router.post('/documents', async (req, res: Response) => {
 
     if (error) throw error;
 
-    // TODO: Queue voice processor job
-    // await voiceProcessorQueue.add('process', {
-    //   accountId,
-    //   documentId: data.id,
-    //   storagePath,
-    // });
+    // Queue voice processor job
+    const job = await voiceProcessorQueue.add('process', {
+      accountId,
+      documentId: data.id,
+      storagePath,
+    });
 
-    res.json({ success: true, document: data });
+    console.log(`[Voice] Uploaded ${filename} and queued for processing (job: ${job.id})`);
+
+    res.json({
+      success: true,
+      document: data,
+      jobId: job.id
+    });
+  } catch (error) {
+    console.error('[Voice] Failed to upload document:', error);
+    res.status(500).json({ error: 'Failed to upload document' });
+  }
+});
+
+/**
+ * DELETE /api/voice/documents/:id
+ * Delete a voice document
+ */
+router.delete('/documents/:id', async (req, res: Response) => {
+  try {
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
+    const { id } = req.params;
+
+    // Get document to find storage path
+    const { data: doc, error: findError } = await getSupabase()
+      .from('voice_documents')
+      .select('storage_path')
+      .eq('id', id)
+      .eq('account_id', accountId)
+      .single();
+
+    if (findError || !doc) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    // Delete from storage
+    if (doc.storage_path) {
+      await getSupabase()
+        .storage
+        .from('voice-documents')
+        .remove([doc.storage_path]);
+    }
+
+    // Delete related voice examples
+    await getSupabase()
+      .from('voice_examples')
+      .delete()
+      .eq('account_id', accountId)
+      .eq('source', 'document');
+
+    // Delete document record
+    const { error } = await getSupabase()
+      .from('voice_documents')
+      .delete()
+      .eq('id', id)
+      .eq('account_id', accountId);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Voice] Failed to delete document:', error);
+    res.status(500).json({ error: 'Failed to delete document' });
+  }
+});
+
+/**
+ * POST /api/voice/documents
+ * Upload a document for voice training (legacy: expects storagePath)
+ * (Creates record and queues processing)
+ */
+router.post('/documents', async (req, res: Response) => {
+  try {
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
+    const { filename, storagePath, fileSize } = req.body;
+
+    if (!filename || !storagePath) {
+      return res.status(400).json({ error: 'filename and storagePath required' });
+    }
+
+    // Check file size limit (10MB)
+    if (fileSize && fileSize > MAX_FILE_SIZE) {
+      return res.status(400).json({
+        error: `File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB`
+      });
+    }
+
+    // Check supported file types
+    const ext = filename.split('.').pop()?.toLowerCase();
+    const supportedTypes = ['txt', 'md', 'pdf', 'docx'];
+    if (!ext || !supportedTypes.includes(ext)) {
+      return res.status(400).json({
+        error: `Unsupported file type. Supported: ${supportedTypes.join(', ')}`
+      });
+    }
+
+    // Check document count limit
+    const { count, error: countError } = await getSupabase()
+      .from('voice_documents')
+      .select('*', { count: 'exact', head: true })
+      .eq('account_id', accountId);
+
+    if (countError) throw countError;
+
+    if ((count || 0) >= MAX_DOCUMENTS_PER_USER) {
+      return res.status(400).json({
+        error: `Maximum ${MAX_DOCUMENTS_PER_USER} documents allowed. Delete some to upload more.`
+      });
+    }
+
+    // Create document record
+    const { data, error } = await getSupabase()
+      .from('voice_documents')
+      .insert({
+        account_id: accountId,
+        filename,
+        storage_path: storagePath,
+        status: 'pending',
+      })
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    // Queue voice processor job
+    const job = await voiceProcessorQueue.add('process', {
+      accountId,
+      documentId: data.id,
+      storagePath,
+    });
+
+    console.log(`[Voice] Queued document ${data.id} for processing (job: ${job.id})`);
+
+    res.json({
+      success: true,
+      document: data,
+      jobId: job.id
+    });
   } catch (error) {
     console.error('[Voice] Failed to upload document:', error);
     res.status(500).json({ error: 'Failed to upload document' });

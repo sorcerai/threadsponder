@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { SpotlightCard } from '@/components/ui/spotlight-card';
 import { Button } from '@/components/ui/button';
+import { AchievementsCard } from '@/components/ui/achievements-card';
 import { useEODReport, useExportReport } from '@/hooks/useEODReport';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer
@@ -94,6 +95,7 @@ export default function EODReport() {
         </div>
 
         <div className="flex gap-2">
+          <AchievementsCard />
           <Button
             variant="outline"
             size="sm"

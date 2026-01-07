@@ -16,10 +16,6 @@ export default defineConfig({
       '/api': {
         target: process.env.API_URL || 'http://localhost:3008',
         changeOrigin: true,
-      },
-      '/socket.io': {
-        target: process.env.API_URL || 'http://localhost:3008',
-        ws: true,
       }
     }
   }

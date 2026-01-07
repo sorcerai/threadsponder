@@ -4,14 +4,14 @@
  * Focused posts and scheduled posts
  */
 
-import express, { Response } from 'express';
+import express, { Response, Router } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/auth.js';
-import { ThreadsClient } from '@threadsponder/shared/clients/threads.js';
+import { ThreadsClient } from '@threadsponder/shared';
 
-const router = express.Router();
+const router: Router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -45,6 +45,8 @@ const focusedPostSchema = z.object({
   permalinkCom: z.string().optional(),  // threads.com/@user/post/shortcode
   permalinkNet: z.string().optional(),  // threads.net/post/numericId
   shortcode: z.string().optional(),      // Just the shortcode part
+  // Classification targeting - which reply types to respond to
+  targetClassifications: z.array(z.enum(['hostile', 'friendly', 'neutral'])).optional(),
 });
 
 /**
@@ -141,7 +143,7 @@ router.get('/focused', async (req, res: Response) => {
       .from('focused_posts')
       .select(`
         id, post_id, post_text, is_active, created_at,
-        permalink_com, permalink_net, shortcode,
+        permalink_com, permalink_net, shortcode, target_classifications,
         threads_accounts (id, threads_username)
       `)
       .eq('account_id', accountId)
@@ -169,7 +171,7 @@ router.post('/focused', async (req, res: Response) => {
       return res.status(400).json({ error: 'Invalid request body' });
     }
 
-    const { threadsAccountId, postId, postText, permalinkCom, permalinkNet, shortcode } = parsed.data;
+    const { threadsAccountId, postId, postText, permalinkCom, permalinkNet, shortcode, targetClassifications } = parsed.data;
 
     // Verify threads account belongs to user and get credentials for API call
     const { data: threadsAccount } = await getSupabase()
@@ -227,6 +229,8 @@ router.post('/focused', async (req, res: Response) => {
         permalink_net: finalPermalinkNet,
         shortcode: finalShortcode,
         is_active: true,
+        // Default to all classifications if not specified
+        target_classifications: targetClassifications || ['hostile', 'friendly', 'neutral'],
       })
       .select('*')
       .single();
@@ -298,6 +302,51 @@ router.patch('/focused/:id/toggle', async (req, res: Response) => {
   } catch (error) {
     console.error('[Posts] Failed to toggle focused post:', error);
     res.status(500).json({ error: 'Failed to toggle focused post' });
+  }
+});
+
+/**
+ * PATCH /api/posts/focused/:id/classifications
+ * Update target classifications for a focused post
+ */
+router.patch('/focused/:id/classifications', async (req, res: Response) => {
+  try {
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
+    const { id } = req.params;
+    const { targetClassifications } = req.body;
+
+    // Validate classifications
+    const validClassifications = ['hostile', 'friendly', 'neutral'];
+    if (!Array.isArray(targetClassifications) ||
+        !targetClassifications.every(c => validClassifications.includes(c))) {
+      return res.status(400).json({
+        error: 'Invalid classifications. Must be array of: hostile, friendly, neutral'
+      });
+    }
+
+    // Ensure at least one classification is selected
+    if (targetClassifications.length === 0) {
+      return res.status(400).json({ error: 'Must select at least one classification' });
+    }
+
+    const { data, error } = await getSupabase()
+      .from('focused_posts')
+      .update({ target_classifications: targetClassifications })
+      .eq('id', id)
+      .eq('account_id', accountId)
+      .select('id, target_classifications')
+      .single();
+
+    if (error) throw error;
+
+    if (!data) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    res.json({ success: true, post: data });
+  } catch (error) {
+    console.error('[Posts] Failed to update classifications:', error);
+    res.status(500).json({ error: 'Failed to update classifications' });
   }
 });
 

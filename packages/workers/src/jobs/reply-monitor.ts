@@ -10,7 +10,7 @@
 
 import { Job, Worker, Queue } from 'bullmq';
 import IORedis from 'ioredis';
-import { ThreadsClient } from '@threadsponder/shared';
+import { ThreadsClient, ClassificationType } from '@threadsponder/shared';
 import { getTenantService } from '../services/tenant.js';
 import { classifyReply, Classification } from '../utils/classifier.js';
 import { generateResponse, ResponseContext } from '../utils/responder.js';
@@ -137,6 +137,7 @@ async function processReply(
     voiceSettings: any;
     voiceExamples: any[];
     friends: any[];
+    targetClassifications?: ClassificationType[];
   },
   reply: { id: string; text: string; username: string }
 ): Promise<ProcessedReply> {
@@ -200,6 +201,28 @@ async function processReply(
     };
   }
 
+  // Skip if classification doesn't match target classifications for this post
+  if (
+    ctx.targetClassifications &&
+    ctx.targetClassifications.length > 0 &&
+    !ctx.targetClassifications.includes(classificationResult.classification as ClassificationType)
+  ) {
+    console.log(
+      `[Monitor] Skipping @${reply.username} - classification=${classificationResult.classification} not in targets [${ctx.targetClassifications.join(', ')}]`
+    );
+    return {
+      replyId: reply.id,
+      username: reply.username,
+      text: reply.text,
+      classification: classificationResult.classification,
+      confidence: classificationResult.confidence,
+      response: null,
+      posted: false,
+      postId: null,
+      error: `Not in target classifications: ${ctx.targetClassifications.join(', ')}`,
+    };
+  }
+
   // Skip neutral only if VERY low confidence (classifier is uncertain)
   // Lowered from 0.7 to 0.3 - respond to more neutral comments
   if (
@@ -254,7 +277,7 @@ async function processReply(
   try {
     const posted = await ctx.client.replyToPost(reply.id, generatedResponse.reply);
 
-    if (posted) {
+    if (posted.success && posted.replyId) {
       console.log(
         `Posted reply to @${reply.username}: "${generatedResponse.reply.substring(0, 50)}..."`
       );
@@ -272,7 +295,7 @@ async function processReply(
           confidence: classificationResult.confidence,
           response: generatedResponse.reply,
           posted: true,
-          postId: posted.id,
+          postId: posted.replyId,
         },
         Date.now() - startTime,
         generatedResponse.source
@@ -286,7 +309,7 @@ async function processReply(
         confidence: classificationResult.confidence,
         response: generatedResponse.reply,
         posted: true,
-        postId: posted.id,
+        postId: posted.replyId,
       };
     }
   } catch (error) {
@@ -431,6 +454,7 @@ async function processMonitorJob(
             voiceSettings: config.voiceSettings,
             voiceExamples,
             friends: config.friends,
+            targetClassifications: focusedPost.target_classifications,
           },
           {
             id: reply.id,
@@ -512,6 +536,7 @@ async function processMonitorJob(
                 voiceSettings: config.voiceSettings,
                 voiceExamples,
                 friends: config.friends,
+                targetClassifications: focusedPost.target_classifications,
               },
               {
                 id: nestedReply.id,

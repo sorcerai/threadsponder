@@ -4,12 +4,12 @@
  * Stripe subscription management
  */
 
-import express, { Request, Response } from 'express';
+import express, { Request, Response, Router } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import Stripe from 'stripe';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
-const router = express.Router();
+const router: Router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';

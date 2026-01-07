@@ -15,6 +15,8 @@ export interface RerankedResult {
   originalScore: number;
   rerankedScore: number;
   combinedScore: number;
+  title?: string;
+  category?: string;
 }
 
 /**
@@ -48,7 +50,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
  */
 export function rerankWithEmbeddings(
   queryEmbedding: number[],
-  results: Array<{ content: string; source: string; score: number }>,
+  results: Array<{ content: string; source: string; score: number; title?: string; category?: string }>,
   documentEmbeddings: Map<string, number[]>,
   alpha: number = 0.3
 ): RerankedResult[] {
@@ -66,7 +68,9 @@ export function rerankWithEmbeddings(
         source: result.source,
         originalScore: result.score,
         rerankedScore: result.score,
-        combinedScore: result.score
+        combinedScore: result.score,
+        title: result.title,
+        category: result.category
       });
       continue;
     }
@@ -85,7 +89,9 @@ export function rerankWithEmbeddings(
       source: result.source,
       originalScore: result.score,
       rerankedScore,
-      combinedScore
+      combinedScore,
+      title: result.title,
+      category: result.category
     });
   }
 

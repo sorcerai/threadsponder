@@ -1,0 +1,40 @@
+# Dependencies
+node_modules
+**/node_modules
+
+# Build outputs (will be rebuilt in Docker)
+**/dist
+**/.turbo
+
+# Development files
+.git
+.gitignore
+**/.eslintrc*
+**/.prettierrc*
+*.md
+!README.md
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment (secrets managed via Cloud Run)
+.env
+.env.*
+!.env.example
+
+# Dashboard (separate deployment)
+packages/dashboard
+
+# Tests
+**/__tests__
+**/*.test.ts
+**/*.spec.ts
+coverage
+
+# Misc
+.DS_Store
+*.log
+npm-debug.log*

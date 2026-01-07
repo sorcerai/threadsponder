@@ -1,9 +1,20 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, Router } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { spawn } from 'child_process';
 import { AuthenticatedRequest } from '../middleware/auth.js';
+import { tenantPattern, getRedisClient } from '@threadsponder/shared';
 
-const router = express.Router();
+const router: Router = express.Router();
+
+/**
+ * Get organization ID from request context.
+ * In development, uses 'default' org. In production, will be from Clerk auth.
+ */
+function getOrgId(req: Request): string {
+  // TODO: Replace with Clerk auth context when integrated
+  // return req.auth?.orgId || 'default';
+  return (req.headers['x-org-id'] as string) || process.env.DEFAULT_ORG_ID || 'default';
+}
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -339,6 +350,48 @@ router.post('/auto-eval-batch', async (req, res: Response) => {
 });
 
 /**
+ * DELETE /api/finetune/patterns
+ * Clear all pattern stats for the account
+ */
+router.delete('/patterns', async (req, res: Response) => {
+    try {
+        const { accountId } = (req as unknown as AuthenticatedRequest).auth;
+
+        const { error, count } = await getSupabase()
+            .from('pattern_stats')
+            .delete()
+            .eq('account_id', accountId);
+
+        if (error) throw error;
+        res.json({ success: true, deleted: count || 0 });
+    } catch (error: any) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * DELETE /api/finetune/patterns/:pattern
+ * Delete a specific pattern
+ */
+router.delete('/patterns/:pattern', async (req, res: Response) => {
+    try {
+        const { accountId } = (req as unknown as AuthenticatedRequest).auth;
+        const { pattern } = req.params;
+
+        const { error } = await getSupabase()
+            .from('pattern_stats')
+            .delete()
+            .eq('account_id', accountId)
+            .eq('pattern', pattern);
+
+        if (error) throw error;
+        res.json({ success: true, removed: pattern });
+    } catch (error: any) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
  * Banned Phrases (CRUD)
  */
 router.get('/banned', async (req, res: Response) => {
@@ -384,6 +437,80 @@ router.delete('/banned/:phrase', async (req, res: Response) => {
             .eq('phrase', phrase);
         if (error) throw error;
         res.json({ success: true, removed: phrase });
+    } catch (error: any) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * GET /api/finetune/fresh-hostile
+ * Get fresh hostile comments that haven't been responded to yet
+ * Reads from Redis where agent stores live captured comments
+ */
+router.get('/fresh-hostile', async (req, res: Response) => {
+    try {
+        const orgId = getOrgId(req);
+        const limit = Math.min(parseInt(req.query.limit as string) || 20, 50);
+        const redis = await getRedisClient();
+
+        // Get all raw captured comments from live feed (Redis) - tenant-isolated
+        const rawKeys = await redis.keys(tenantPattern(orgId, 'raw', '*'));
+
+        // Get all already-responded hostile IDs from reply_map - tenant-isolated
+        const replyMapKeys = await redis.keys(tenantPattern(orgId, 'reply', 'map', '*'));
+        const respondedHostileIds = new Set<string>();
+
+        for (const mapKey of replyMapKeys) {
+            const mapData = await redis.hgetall(mapKey) as Record<string, string> | null;
+            if (mapData && mapData.hostile_id) {
+                respondedHostileIds.add(mapData.hostile_id);
+            }
+        }
+
+        const freshHostile: any[] = [];
+
+        for (const rawKey of rawKeys) {
+            if (freshHostile.length >= limit) break;
+
+            // Extract ID from tenant-scoped key: org:{orgId}:raw:{id}
+            const rawId = rawKey.split(':').pop() || '';
+
+            // Skip if we already responded to this comment
+            if (respondedHostileIds.has(rawId)) continue;
+
+            const data = await redis.hgetall(rawKey) as Record<string, string> | null;
+            if (!data || !data.text || data.text.trim().length === 0) continue;
+
+            // Skip our own posts
+            const ourUserId = process.env.THREADS_USER_ID;
+            if (ourUserId && data.username === ourUserId) continue;
+
+            freshHostile.push({
+                id: rawId,
+                text: data.text,
+                username: data.username || 'unknown',
+                postId: data.postId || '',
+                timestamp: data.timestamp || data.capturedAt || '',
+                capturedAt: data.capturedAt || '',
+                mediaUrl: data.mediaUrl || null,
+                mediaType: data.mediaType || null
+            });
+        }
+
+        // Sort by capturedAt descending (newest first)
+        freshHostile.sort((a, b) => {
+            const dateA = new Date(a.capturedAt || a.timestamp || 0).getTime();
+            const dateB = new Date(b.capturedAt || b.timestamp || 0).getTime();
+            return dateB - dateA;
+        });
+
+        res.json({
+            success: true,
+            comments: freshHostile.slice(0, limit),
+            count: freshHostile.length,
+            totalRaw: rawKeys.length,
+            totalResponded: respondedHostileIds.size
+        });
     } catch (error: any) {
         res.status(500).json({ success: false, error: error.message });
     }

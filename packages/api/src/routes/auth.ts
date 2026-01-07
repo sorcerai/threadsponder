@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 import { z } from 'zod';
+import { oauthState } from '@threadsponder/shared';
 
 const router: Router = Router();
 
@@ -12,13 +13,24 @@ const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
 const THREADS_APP_ID = process.env.THREADS_APP_ID || '';
 const THREADS_APP_SECRET = process.env.THREADS_APP_SECRET || '';
 const THREADS_REDIRECT_URI = process.env.THREADS_REDIRECT_URI || '';
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
 function getSupabase() {
     return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 }
 
+/**
+ * Encrypt OAuth token with AES-256-CBC
+ * FAIL-CLOSED: Throws error if ENCRYPTION_KEY not set in production
+ */
 function encryptToken(token: string): string {
-    if (!ENCRYPTION_KEY) return token; // Fallback if no key (dev)
+    if (!ENCRYPTION_KEY) {
+        if (NODE_ENV === 'production') {
+            throw new Error('ENCRYPTION_KEY is required in production - refusing to store unencrypted tokens');
+        }
+        console.warn('[AUTH] WARNING: ENCRYPTION_KEY not set - tokens stored unencrypted (dev only)');
+        return `UNENCRYPTED:${token}`;
+    }
     const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv(
         'aes-256-cbc',
@@ -30,26 +42,52 @@ function encryptToken(token: string): string {
     return `${iv.toString('hex')}:${encrypted}`;
 }
 
+/**
+ * Generate cryptographically secure CSRF state token
+ */
+function generateStateToken(): string {
+    return crypto.randomBytes(32).toString('hex');
+}
+
 // Start OAuth flow
-router.get('/threads', (req: Request, res: Response) => {
-    if (!THREADS_APP_ID || !THREADS_REDIRECT_URI) {
-        return res.status(500).json({ error: 'OAuth not configured' });
+router.get('/threads', async (req: Request, res: Response) => {
+    try {
+        if (!THREADS_APP_ID || !THREADS_REDIRECT_URI) {
+            return res.status(500).json({ error: 'OAuth not configured' });
+        }
+
+        // Get orgId from authenticated request (Clerk middleware should provide this)
+        // For now, we require it as a query parameter until Clerk integration is complete
+        const orgId = req.query.org_id as string;
+        if (!orgId) {
+            return res.status(400).json({
+                error: 'org_id is required',
+                message: 'Organization ID must be provided to connect Threads account'
+            });
+        }
+
+        // Generate CSRF state token and store with orgId in Redis (5min TTL)
+        const stateToken = generateStateToken();
+        await oauthState.set(stateToken, orgId);
+
+        const scopes = [
+            'threads_basic',
+            'threads_content_publish'
+        ].join(',');
+
+        const url = `https://threads.net/oauth/authorize?client_id=${THREADS_APP_ID}&redirect_uri=${encodeURIComponent(THREADS_REDIRECT_URI)}&scope=${scopes}&response_type=code&state=${stateToken}`;
+
+        res.redirect(url);
+    } catch (error) {
+        console.error('[OAuth] Start flow error:', error);
+        res.status(500).json({ error: 'Failed to start OAuth flow' });
     }
-
-    const scopes = [
-        'threads_basic',
-        'threads_content_publish'
-    ].join(',');
-
-    const url = `https://threads.net/oauth/authorize?client_id=${THREADS_APP_ID}&redirect_uri=${encodeURIComponent(THREADS_REDIRECT_URI)}&scope=${scopes}&response_type=code`;
-
-    res.redirect(url);
 });
 
 // OAuth Callback
 router.get('/threads/callback', async (req: Request, res: Response) => {
     try {
-        const { code, error, error_description } = req.query;
+        const { code, state, error, error_description } = req.query;
 
         if (error) {
             console.error('[OAuth] Threads error:', error, error_description);
@@ -58,6 +96,18 @@ router.get('/threads/callback', async (req: Request, res: Response) => {
 
         if (!code) {
             return res.redirect('/?error=no_code');
+        }
+
+        // CSRF Protection: Validate state token and get orgId
+        if (!state || typeof state !== 'string') {
+            console.error('[OAuth] Missing state parameter - possible CSRF attack');
+            return res.redirect('/?error=invalid_state');
+        }
+
+        const orgId = await oauthState.validate(state);
+        if (!orgId) {
+            console.error('[OAuth] Invalid or expired state token - possible CSRF attack');
+            return res.redirect('/?error=state_expired');
         }
 
         // Exchange code for token
@@ -83,35 +133,38 @@ router.get('/threads/callback', async (req: Request, res: Response) => {
 
         const { access_token, user_id } = tokenData;
 
-        // Encrypt token
-        const encryptedToken = encryptToken(access_token!);
+        // Encrypt token (fail-closed in production if no ENCRYPTION_KEY)
+        let encryptedToken: string;
+        try {
+            encryptedToken = encryptToken(access_token!);
+        } catch (encryptError) {
+            console.error('[OAuth] Encryption failed:', encryptError);
+            return res.redirect('/?error=encryption_failed');
+        }
 
-        // Save to Supabase
-        // Note: In a real app, we need to know WHICH account this belongs to.
-        // For this MVP, we assume a single account or 'default' until we have proper state passing.
-        // We can try to get accountId from req.query.state if we passed it earlier.
-        const accountId = (req.query.state as string) || 'default_account';
-
+        // Save to Supabase with proper tenant isolation
         const { error: dbError } = await getSupabase()
             .from('threads_accounts')
             .upsert(
                 {
-                    account_id: accountId,
+                    organization_id: orgId,  // Tenant isolation via orgId from validated state
                     threads_user_id: String(user_id),
-                    threads_username: null, // We'd need another call to get username
-                    access_token_encrypted: encryptedToken,
+                    threads_username: null, // Fetched separately via profile API
+                    encrypted_access_token: encryptedToken,
                     is_active: true,
+                    updated_at: new Date().toISOString(),
                 },
                 {
-                    onConflict: 'account_id,threads_user_id',
+                    onConflict: 'organization_id,threads_user_id',
                 }
             );
 
         if (dbError) {
-            console.error('DB Error:', dbError);
+            console.error('[OAuth] DB Error:', dbError);
             return res.redirect('/?error=db_save_failed');
         }
 
+        console.log(`[OAuth] Successfully connected Threads account for org ${orgId}`);
         res.redirect('/?success=connected');
 
     } catch (error) {

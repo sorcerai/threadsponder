@@ -1,5 +1,6 @@
 import { SpotlightCard } from '@/components/ui/spotlight-card';
 import { usePatterns, useClassifications, useHourlyDistribution } from '@/hooks/useAnalytics';
+import { GhostAnalytics } from '@/components/analytics/GhostAnalytics';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, Tooltip, Legend
@@ -38,6 +39,9 @@ export default function Analytics() {
           Performance metrics, pattern effectiveness, and engagement trends.
         </p>
       </div>
+
+      {/* Ghost Analytics - Velocity & Engagement */}
+      <GhostAnalytics />
 
       {/* Charts Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

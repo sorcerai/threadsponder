@@ -1,35 +1,64 @@
-import { useEffect, useRef, useState } from 'react';
-import { io, Socket } from 'socket.io-client';
+/**
+ * useSocket Hook - Disabled for Serverless Deployment
+ *
+ * Socket.io has been removed for Netlify Functions compatibility.
+ * The dashboard now uses React Query polling fallback (refetchInterval: 60000).
+ *
+ * This hook returns a mock socket that does nothing, so existing code
+ * that calls socket.on() or socket.emit() won't crash.
+ */
+
+// Create a no-op mock socket that matches the Socket interface
+const mockSocket = {
+    on: () => mockSocket,
+    off: () => mockSocket,
+    emit: () => mockSocket,
+    connect: () => mockSocket,
+    disconnect: () => mockSocket,
+    connected: false,
+    id: undefined,
+} as const;
 
 export function useSocket() {
-    const socketRef = useRef<Socket | null>(null);
-    const [isConnected, setIsConnected] = useState(false);
-
-    useEffect(() => {
-        // Determine URL based on environment
-        // In dev: proxy handles it (relative path)
-        // In prod: relative path works too if served from same origin
-        const socket = io('/', {
-            path: '/socket.io',
-            transports: ['websocket', 'polling'], // Try websocket first
-        });
-
-        socketRef.current = socket;
-
-        socket.on('connect', () => {
-            console.log('Socket connected');
-            setIsConnected(true);
-        });
-
-        socket.on('disconnect', () => {
-            console.log('Socket disconnected');
-            setIsConnected(false);
-        });
-
-        return () => {
-            socket.disconnect();
-        };
-    }, []);
-
-    return { socket: socketRef.current, isConnected };
+    // Return mock socket - real-time updates disabled for serverless
+    // Dashboard uses React Query polling (60s intervals) instead
+    return {
+        socket: mockSocket as any,
+        isConnected: false
+    };
 }
+
+// Original implementation (kept for reference if needed for self-hosted version):
+//
+// import { useEffect, useRef, useState } from 'react';
+// import { io, Socket } from 'socket.io-client';
+//
+// export function useSocket() {
+//     const socketRef = useRef<Socket | null>(null);
+//     const [isConnected, setIsConnected] = useState(false);
+//
+//     useEffect(() => {
+//         const socket = io('/', {
+//             path: '/socket.io',
+//             transports: ['websocket', 'polling'],
+//         });
+//
+//         socketRef.current = socket;
+//
+//         socket.on('connect', () => {
+//             console.log('Socket connected');
+//             setIsConnected(true);
+//         });
+//
+//         socket.on('disconnect', () => {
+//             console.log('Socket disconnected');
+//             setIsConnected(false);
+//         });
+//
+//         return () => {
+//             socket.disconnect();
+//         };
+//     }, []);
+//
+//     return { socket: socketRef.current, isConnected };
+// }

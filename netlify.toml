@@ -1,16 +1,32 @@
 [build]
-  command = "pnpm --filter @threadsponder/dashboard build"
+  command = "pnpm install && pnpm --filter @threadsponder/api build && pnpm --filter @threadsponder/dashboard build"
   publish = "packages/dashboard/dist"
 
 [dev]
   command = "pnpm --filter @threadsponder/dashboard dev"
 
 [functions]
+  directory = "netlify/functions"
   node_bundler = "esbuild"
+  included_files = ["packages/api/src/**/*"]
 
+# Environment variables needed for functions
+[context.production.environment]
+  NODE_ENV = "production"
+
+# ============================================
+# Scheduled Functions
+# ============================================
+# EOD Report Generation - Daily at 5 PM UTC
+[functions."scheduled-eod-report"]
+  schedule = "0 17 * * *"
+
+# ============================================
+# Redirects
+# ============================================
 [[redirects]]
   from = "/api/*"
-  to = "/.netlify/functions/api"
+  to = "/.netlify/functions/api/:splat"
   status = 200
 
 [[redirects]]

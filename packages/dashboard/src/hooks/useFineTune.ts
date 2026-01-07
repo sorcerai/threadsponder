@@ -86,8 +86,39 @@ export function useUnratedReplies(limit: number = 20) {
       if (!res.ok) throw new Error('Failed to fetch unrated replies');
       return res.json();
     },
-    refetchInterval: 60000,
-    staleTime: 30000
+    refetchInterval: 10000,  // Refresh every 10 seconds for active testing
+    staleTime: 5000          // Data stale after 5 seconds
+  });
+}
+
+// Fresh hostile comments hook - gets LIVE comments that haven't been responded to yet
+export interface FreshHostileComment {
+  id: string;
+  text: string;
+  username: string;
+  postId: string;
+  timestamp: string;
+  capturedAt: string;
+  mediaUrl: string | null;
+  mediaType: string | null;
+}
+
+export function useFreshHostile(limit: number = 20) {
+  return useQuery<{
+    success: boolean;
+    comments: FreshHostileComment[];
+    count: number;
+    totalRaw: number;
+    totalResponded: number;
+  }>({
+    queryKey: ['finetune-fresh-hostile', limit],
+    queryFn: async () => {
+      const res = await fetch(`/api/finetune/fresh-hostile?limit=${limit}`);
+      if (!res.ok) throw new Error('Failed to fetch fresh hostile comments');
+      return res.json();
+    },
+    refetchInterval: 5000,   // Refresh every 5 seconds for live feed
+    staleTime: 2000          // Data stale after 2 seconds
   });
 }
 
@@ -303,6 +334,50 @@ export function useAutoEvalBatch() {
       queryClient.invalidateQueries({ queryKey: ['finetune-patterns'] });
       queryClient.invalidateQueries({ queryKey: ['finetune-unrated'] });
       queryClient.invalidateQueries({ queryKey: ['finetune-history'] });
+    }
+  });
+}
+
+// Clear all patterns mutation
+export function useClearPatterns() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (): Promise<{ success: boolean; deleted: number }> => {
+      const res = await fetch('/api/finetune/patterns', {
+        method: 'DELETE'
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to clear patterns');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['finetune-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['finetune-patterns'] });
+    }
+  });
+}
+
+// Remove a single pattern mutation
+export function useRemovePattern() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (pattern: string): Promise<{ success: boolean; removed: string }> => {
+      const res = await fetch(`/api/finetune/patterns/${encodeURIComponent(pattern)}`, {
+        method: 'DELETE'
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to remove pattern');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['finetune-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['finetune-patterns'] });
     }
   });
 }

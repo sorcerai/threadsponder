@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useStats } from '@/hooks/useStats';
 import { useReplies } from '@/hooks/useReplies';
 import { useHourlyDistribution } from '@/hooks/useAnalytics';
+import { useUpdateClassifications, ClassificationType } from '@/hooks/useFocusedPosts';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { SpotlightCard } from '@/components/ui/spotlight-card';
@@ -56,6 +57,7 @@ interface FocusData {
             permalinkNet: string;
             shortcode?: string;
         };
+        targetClassifications?: ClassificationType[];
     }>;
     hasPausedPosts?: boolean;
     pausedPostCount?: number;
@@ -66,6 +68,7 @@ export default function Dashboard() {
     const { data: repliesData } = useReplies(10);
     const { data: hourlyData } = useHourlyDistribution();
     const queryClient = useQueryClient();
+    const updateClassifications = useUpdateClassifications();
 
     // Focus mode state
     const [focusInput, setFocusInput] = useState('');
@@ -515,32 +518,87 @@ export default function Dashboard() {
                         {focusData?.mode === 'focused' && focusData.postIds.length > 0 && (
                             <div className="mb-4 space-y-2">
                                 <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Monitoring:</p>
-                                <div className="space-y-1 max-h-[200px] overflow-y-auto">
+                                <div className="space-y-2 max-h-[300px] overflow-y-auto">
                                     {focusData.postIds.map((id) => {
                                         const post = focusData.posts?.find(p => p.id === id);
                                         const postText = post?.text || '';
-                                        const truncatedText = postText.length > 50 ? postText.slice(0, 50) + '...' : postText;
-                                        // Use stored permalink (permalinkCom preferred, fallback to permalinkNet)
+                                        const truncatedText = postText.length > 40 ? postText.slice(0, 40) + '...' : postText;
                                         const postUrl = post?.urls?.permalinkCom || post?.urls?.permalinkNet || `https://www.threads.net/post/${id}`;
+                                        const currentClassifications = post?.targetClassifications || ['hostile', 'friendly', 'neutral'];
+
+                                        const toggleClassification = (classification: ClassificationType) => {
+                                            const isActive = currentClassifications.includes(classification);
+                                            let newClassifications: ClassificationType[];
+                                            if (isActive && currentClassifications.length > 1) {
+                                                newClassifications = currentClassifications.filter(c => c !== classification);
+                                            } else if (!isActive) {
+                                                newClassifications = [...currentClassifications, classification];
+                                            } else {
+                                                return; // Can't remove last classification
+                                            }
+                                            updateClassifications.mutate({ postId: id, targetClassifications: newClassifications });
+                                        };
+
                                         return (
-                                            <div key={id} className="flex items-center justify-between p-2 bg-zinc-900/50 rounded border border-zinc-800 group">
-                                                <a
-                                                    href={postUrl}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="text-xs font-mono text-zinc-400 hover:text-orange-400 truncate flex-1 flex items-center gap-1.5 transition-colors"
-                                                    title={postText || `Post ${id}`}
-                                                >
-                                                    <span>{truncatedText || `Post ...${id.slice(-8)}`}</span>
-                                                    <ExternalLink className="w-3 h-3 opacity-50 flex-shrink-0" />
-                                                </a>
-                                                <button
-                                                    onClick={() => handleRemoveFocus(id)}
-                                                    className="ml-2 p-1 text-zinc-600 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors opacity-0 group-hover:opacity-100"
-                                                    title="Remove from focus"
-                                                >
-                                                    <X className="w-3 h-3" />
-                                                </button>
+                                            <div key={id} className="p-2 bg-zinc-900/50 rounded border border-zinc-800 group">
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <a
+                                                        href={postUrl}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="text-xs font-mono text-zinc-400 hover:text-orange-400 truncate flex-1 flex items-center gap-1.5 transition-colors"
+                                                        title={postText || `Post ${id}`}
+                                                    >
+                                                        <span>{truncatedText || `Post ...${id.slice(-8)}`}</span>
+                                                        <ExternalLink className="w-3 h-3 opacity-50 flex-shrink-0" />
+                                                    </a>
+                                                    <button
+                                                        onClick={() => handleRemoveFocus(id)}
+                                                        className="ml-2 p-1 text-zinc-600 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors opacity-0 group-hover:opacity-100"
+                                                        title="Remove from focus"
+                                                    >
+                                                        <X className="w-3 h-3" />
+                                                    </button>
+                                                </div>
+                                                {/* Classification targeting toggles */}
+                                                <div className="flex gap-1">
+                                                    <button
+                                                        onClick={() => toggleClassification('hostile')}
+                                                        className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                                            currentClassifications.includes('hostile')
+                                                                ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                                                                : 'bg-zinc-800 text-zinc-600 border border-zinc-700 hover:border-zinc-600'
+                                                        }`}
+                                                        title="Toggle hostile replies"
+                                                    >
+                                                        <Flame className="w-3 h-3 inline mr-1" />
+                                                        Hostile
+                                                    </button>
+                                                    <button
+                                                        onClick={() => toggleClassification('friendly')}
+                                                        className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                                            currentClassifications.includes('friendly')
+                                                                ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                                                                : 'bg-zinc-800 text-zinc-600 border border-zinc-700 hover:border-zinc-600'
+                                                        }`}
+                                                        title="Toggle friendly replies"
+                                                    >
+                                                        <Sparkles className="w-3 h-3 inline mr-1" />
+                                                        Friendly
+                                                    </button>
+                                                    <button
+                                                        onClick={() => toggleClassification('neutral')}
+                                                        className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                                                            currentClassifications.includes('neutral')
+                                                                ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                                                                : 'bg-zinc-800 text-zinc-600 border border-zinc-700 hover:border-zinc-600'
+                                                        }`}
+                                                        title="Toggle neutral replies"
+                                                    >
+                                                        <Scale className="w-3 h-3 inline mr-1" />
+                                                        Neutral
+                                                    </button>
+                                                </div>
                                             </div>
                                         );
                                     })}

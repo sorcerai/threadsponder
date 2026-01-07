@@ -117,12 +117,12 @@ async function publishScheduledPost(
     // TODO: Handle media_urls for image/video posts
     const result = await client.createPost(scheduledPost.content);
 
-    if (result) {
-      console.log(`[PostScheduler] Posted successfully: ${result.id}`);
+    if (result.success && result.postId) {
+      console.log(`[PostScheduler] Posted successfully: ${result.postId}`);
       await updatePostStatus(scheduledPostId, 'posted', {
-        posted_id: result.id,
+        posted_id: result.postId,
       });
-      return { posted: true, postId: result.id };
+      return { posted: true, postId: result.postId };
     } else {
       throw new Error('Post creation returned null');
     }

@@ -261,7 +261,7 @@ export class BotLoopDetector {
       input.incomingText
         .toLowerCase()
         .split(/\s+/)
-        .filter((w) => w.length > 2)
+        .filter((w: string) => w.length > 2)
     );
 
     for (const output of recentOutputs) {
@@ -269,11 +269,11 @@ export class BotLoopDetector {
         output.output_text
           .toLowerCase()
           .split(/\s+/)
-          .filter((w) => w.length > 2)
+          .filter((w: string) => w.length > 2)
       );
 
       // Calculate Jaccard similarity
-      const intersection = new Set([...incomingWords].filter((w) => outputWords.has(w)));
+      const intersection = new Set([...incomingWords].filter((w: string) => outputWords.has(w)));
       const union = new Set([...incomingWords, ...outputWords]);
 
       const similarity = intersection.size / Math.max(union.size, 1);

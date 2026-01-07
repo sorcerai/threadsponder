@@ -10,12 +10,17 @@
     "lint": "eslint src/"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
     "@supabase/supabase-js": "^2.46.0",
     "@threadsponder/shared": "workspace:*",
     "bullmq": "^5.30.0",
+    "chonkie": "0.2.6",
     "ioredis": "^5.4.0",
+    "mammoth": "^1.11.0",
     "node-cron": "^3.0.3",
     "openai": "^6.15.0",
+    "pdf-parse": "^2.4.5",
+    "winston": "^3.17.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {

@@ -1,20 +1,22 @@
 /**
- * Gemini CLI wrapper for ragebait response generation
+ * Gemini response generation for ragebait replies
  *
- * Uses RAG from DragonflyDB to match user's actual voice:
+ * Uses LLM provider abstraction with automatic fallback:
+ * - Primary: Google Gemini SDK (direct API, ~3-5s)
+ * - Fallback: OpenRouter (supports multiple models)
+ *
+ * Uses RAG from Redis to match user's actual voice:
  * - Fetches real reply examples from threads:replies:*
  * - Matches tone based on classification
  * - 2-20 word variety for natural responses
- *
- * Trade-off: Slower than GLM (~25-30s) but much higher quality
  */
 
-import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import Redis from 'ioredis';
 import { getResearchProvider } from '../providers/research-provider.js';
 import { logger } from './shared-logger.js';
+import { generateWithFallback, isLLMAvailable, GenerateResult } from './llm-provider.js';
+import { tenantKeys, tenantPattern, getRedisClient } from '@threadsponder/shared';
 
 // Load character config for reply style
 let characterConfig: any = null;
@@ -25,13 +27,6 @@ try {
   // Fallback if character.json not found
   characterConfig = null;
 }
-
-// Redis connection for RAG
-const redis = new Redis({
-  host: process.env.DRAGONFLY_HOST || 'localhost',
-  port: parseInt(process.env.DRAGONFLY_PORT || '6381'),
-  lazyConnect: true
-});
 
 // Track recent outputs to prevent repetition (in-memory, resets on restart)
 const recentOutputs: string[] = [];
@@ -44,6 +39,11 @@ const BANNED_PATTERNS: RegExp[] = [
   /\bfederal court/i,  // legal jargon out of place
   /\bfor a (jpeg|png|gif|image|meme)\b/i,  // context-dependent, often wrong
   /\bprojection is wild\b/i,  // overused
+  // Identity leak prevention - never reveal bot nature
+  /\b(i('m| am) a (bot|script|ai|algorithm))\b/i,  // direct bot admission
+  /\b(impress(ing)? a script)\b/i,  // "impress a script" self-reference
+  /\bi run on (code|electricity|algorithms?)\b/i,  // bot nature reveal
+  /\b(script|bot|algorithm) (like me|that i am)\b/i,  // self-reference as bot
 ];
 
 // Similarity threshold - reject if >60% word overlap with recent replies
@@ -111,31 +111,24 @@ function validateReply(text: string, recentReplies: string[]): string | null {
  * Fetch last N bot replies from Redis to prevent repetition
  * Returns array of recent our_text values, sorted by timestamp desc
  */
-async function getRecentBotReplies(count: number = 10): Promise<string[]> {
+async function getRecentBotReplies(orgId: string, count: number = 10): Promise<string[]> {
   try {
-    await redis.connect().catch(() => {}); // Ignore if already connected
+    const redis = await getRedisClient();
 
-    // Get all reply_map keys
-    const keys = await redis.keys('threads:reply_map:*');
+    // Get all reply_map keys for this tenant
+    const pattern = tenantPattern(orgId, 'reply', 'map', '*');
+    const keys = await redis.keys(pattern);
     if (keys.length === 0) return [];
 
-    // Get timestamp and our_text for each
-    const pipeline = redis.pipeline();
-    for (const key of keys) {
-      pipeline.hmget(key, 'timestamp', 'our_text');
-    }
-    const results = await pipeline.exec();
-
-    // Parse and sort by timestamp
+    // Get timestamp and our_text for each (Upstash doesn't support pipeline, fetch individually)
     const replies: { timestamp: number; text: string }[] = [];
-    if (results) {
-      for (const [err, data] of results) {
-        if (!err && Array.isArray(data) && data[0] && data[1]) {
-          replies.push({
-            timestamp: parseInt(data[0] as string) || 0,
-            text: data[1] as string
-          });
-        }
+    for (const key of keys) {
+      const data = await redis.hmget(key, 'timestamp', 'our_text');
+      if (data && data[0] && data[1]) {
+        replies.push({
+          timestamp: parseInt(data[0] as string) || 0,
+          text: data[1] as string
+        });
       }
     }
 
@@ -149,12 +142,12 @@ async function getRecentBotReplies(count: number = 10): Promise<string[]> {
 }
 
 /**
- * Fetch real reply examples from DragonflyDB for RAG
+ * Fetch real reply examples from Upstash Redis for RAG
  * Returns a mix of short/medium/longer replies based on classification
  */
-async function getReplyExamplesFromRAG(classification: 'friendly' | 'neutral' | 'hostile'): Promise<string[]> {
+async function getReplyExamplesFromRAG(orgId: string, classification: 'friendly' | 'neutral' | 'hostile'): Promise<string[]> {
   try {
-    await redis.connect().catch(() => {}); // Ignore if already connected
+    const redis = await getRedisClient();
 
     // For hostile: mix of short dunks + some medium educated dismissals
     // For friendly/neutral: more medium/longer conversational
@@ -162,20 +155,20 @@ async function getReplyExamplesFromRAG(classification: 'friendly' | 'neutral' | 
 
     if (classification === 'hostile') {
       // 5 short dunks + 3 medium educated dismissals for variety
-      const short = await redis.lrange('threads:replies:short', 0, 49);
-      const medium = await redis.lrange('threads:replies:medium', 0, 29);
+      const short = await redis.lrange(tenantKeys.replies.short(orgId), 0, 49);
+      const medium = await redis.lrange(tenantKeys.replies.medium(orgId), 0, 29);
 
       // Random sample
-      const shortSample = short.sort(() => Math.random() - 0.5).slice(0, 5);
-      const mediumSample = medium.sort(() => Math.random() - 0.5).slice(0, 3);
+      const shortSample = (short || []).sort(() => Math.random() - 0.5).slice(0, 5);
+      const mediumSample = (medium || []).sort(() => Math.random() - 0.5).slice(0, 3);
       examples = [...shortSample, ...mediumSample];
     } else {
       // For friendly/neutral: mostly medium with some longer
-      const medium = await redis.lrange('threads:replies:medium', 0, 49);
-      const longer = await redis.lrange('threads:replies:longer', 0, 12);
+      const medium = await redis.lrange(tenantKeys.replies.medium(orgId), 0, 49);
+      const longer = await redis.lrange(tenantKeys.replies.longer(orgId), 0, 12);
 
-      const mediumSample = medium.sort(() => Math.random() - 0.5).slice(0, 5);
-      const longerSample = longer.sort(() => Math.random() - 0.5).slice(0, 2);
+      const mediumSample = (medium || []).sort(() => Math.random() - 0.5).slice(0, 5);
+      const longerSample = (longer || []).sort(() => Math.random() - 0.5).slice(0, 2);
       examples = [...mediumSample, ...longerSample];
     }
 
@@ -227,90 +220,80 @@ interface GeminiResponse {
   success: boolean;
   text: string;
   error?: string;
+  provider?: string;
+  latencyMs?: number;
 }
 
 /**
- * Call Gemini CLI for response generation
- * Uses --allowed-mcp-server-names none to skip MCP loading (~25s vs 60s+)
+ * Call LLM for response generation
+ * Uses SDK-based provider abstraction with automatic fallback:
+ * - Primary: Google Gemini SDK (direct API, fast)
+ * - Fallback: OpenRouter (if Gemini fails)
  */
-async function callGemini(prompt: string, timeout = 45000): Promise<GeminiResponse> {
-  return new Promise((resolve) => {
-    let resolved = false;
+async function callGemini(prompt: string, timeout = 30000): Promise<GeminiResponse> {
+  logger.info('Calling LLM provider (SDK)...');
 
-    logger.info('Calling Gemini CLI (no MCP)...');
-    const proc = spawn('gemini', ['--allowed-mcp-server-names', 'none', prompt], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env
-    });
-
-    proc.stdin.end();
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on('close', (code) => {
-      if (resolved) return;
-      resolved = true;
-
-      if (code === 0 && stdout.trim()) {
-        resolve({ success: true, text: stdout.trim() });
-      } else {
-        logger.warn(`Gemini exited with code ${code}: ${stderr}`);
-        resolve({ success: false, text: '', error: stderr || `Exit code ${code}` });
-      }
-    });
-
-    proc.on('error', (err) => {
-      if (resolved) return;
-      resolved = true;
-
-      logger.error('Gemini spawn error:', err);
-      resolve({ success: false, text: '', error: err.message });
-    });
-
-    const timeoutId = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-
-      proc.kill('SIGTERM');
-      logger.warn('Gemini timeout');
-      resolve({ success: false, text: '', error: 'Timeout' });
-    }, timeout);
-
-    proc.on('close', () => clearTimeout(timeoutId));
+  const result: GenerateResult = await generateWithFallback(prompt, {
+    temperature: 0.9,
+    maxTokens: 256,
+    timeout,
   });
+
+  if (result.success) {
+    logger.info(`LLM response via ${result.provider} (${result.latencyMs}ms)`);
+    return {
+      success: true,
+      text: result.text,
+      provider: result.provider,
+      latencyMs: result.latencyMs,
+    };
+  }
+
+  logger.warn(`LLM generation failed: ${result.error}`);
+  return {
+    success: false,
+    text: '',
+    error: result.error,
+    provider: result.provider,
+    latencyMs: result.latencyMs,
+  };
 }
 
 /**
- * Generate ragebait reply using Gemini CLI with RAG
+ * Thread context for multi-reply awareness
+ */
+export interface ThreadContext {
+  originalPost: string;           // The post being replied to
+  previousReplies?: string[];     // Previous replies in the thread (newest first)
+  replyingToUsername?: string;    // Who the hostile comment is from
+}
+
+/**
+ * Generate ragebait reply using LLM with RAG
  *
- * Uses actual user replies from DragonflyDB for voice matching
+ * Uses actual user replies from Upstash Redis for voice matching
  * Pros: Excellent quality, proper voice matching with real examples
  * Cons: Slower (~25-30s per response)
+ *
+ * @param orgId - Organization ID for multi-tenant isolation
  */
 export async function generateReplyGemini(
+  orgId: string,
   replyText: string,
   classification: 'friendly' | 'neutral' | 'hostile',
   friendMode: 'banter' | 'roast' | 'supportive' | null = null,
   imageDescription?: string,  // From vision classifier for image/GIF replies
   isMetaComment: boolean = false,  // P3: Fourth-wall handling
-  confidence: number = 0.8  // P4: Confidence-based pivots
+  confidence: number = 0.8,  // P4: Confidence-based pivots
+  threadContext?: ThreadContext  // Thread context for multi-reply awareness
 ): Promise<string> {
   const safeReply = sanitizeInput(replyText);
 
-  // Fetch real examples from RAG (DragonflyDB)
-  const ragExamples = await getReplyExamplesFromRAG(classification);
+  // Fetch real examples from RAG (Upstash Redis - tenant-scoped)
+  const ragExamples = await getReplyExamplesFromRAG(orgId, classification);
 
-  // Fetch recent bot replies to prevent repetition
-  const recentReplies = await getRecentBotReplies(10);
+  // Fetch recent bot replies to prevent repetition (tenant-scoped)
+  const recentReplies = await getRecentBotReplies(orgId, 10);
 
   // Fallback examples if RAG fails
   const fallbackExamples = {
@@ -438,6 +421,15 @@ When in doubt, be SHORT and DISMISSIVE.`;
     }
 
     styleGuide = `${lengthGuide}
+
+🤖 IDENTITY PROTECTION (CRITICAL):
+- NEVER reveal or hint that you're AI/bot/automated/code/algorithm/script
+- NEVER reference biology, electricity, code, machine nature, or "script"
+- NEVER say "i run on...", "you run on...", or call yourself a "script"
+- NEVER use "script" to describe yourself or as a self-deprecating joke
+- You are a HUMAN creator who uses AI tools - you are NOT a bot/script
+- If they don't accuse you of being a bot, you don't bring it up
+- Respond as a dismissive tech creator, not as an AI entity
 
 NO emoji ever. Can end with "lol" or "lmao" sparingly.
 
@@ -638,14 +630,16 @@ Generate ORIGINAL responses - never copy examples verbatim.`;
 Match their energy. Acknowledge without overdoing it. No sycophantic praise.`;
   }
 
-  logger.info(`RAG examples loaded: ${exampleList.length} (from ${ragExamples.length > 0 ? 'DragonflyDB' : 'fallback'})`);
+  logger.info(`RAG examples loaded: ${exampleList.length} (from ${ragExamples.length > 0 ? 'Upstash Redis' : 'fallback'})`);
 
   // Search for relevant ammunition (hostile only - for factual clap backs)
   let ammoSection = '';
   if (classification === 'hostile' && isRant) {
     try {
       const research = getResearchProvider();
-      const ammoResults = await research.searchAmmo(safeReply, 5);  // Get 5 for variety
+      // TODO: Phase 3 - Pass orgId from caller context (multi-tenant migration)
+      const defaultOrgId = process.env.DEFAULT_ORG_ID || 'default';
+      const ammoResults = await research.searchAmmo(defaultOrgId, safeReply, 5);  // Get 5 for variety
       if (ammoResults.length > 0) {
         ammoSection = `\n\n[AMMUNITION - PICK ONE fact to use, rotate sources]
 ${research.formatAmmoForPrompt(ammoResults)}
@@ -702,6 +696,35 @@ ONLY respond to the TEXT they wrote.`;
     ? `Their comment: "${safeReply}"`
     : `(No text, just the image/GIF)`;
 
+  // Build thread context section for multi-reply awareness
+  let threadContextSection = '';
+  if (threadContext) {
+    const safeOriginalPost = sanitizeInput(threadContext.originalPost);
+    if (safeOriginalPost) {
+      threadContextSection = `\n\n[THREAD CONTEXT - CRITICAL FOR RELEVANCE]
+YOUR ORIGINAL POST: "${safeOriginalPost}"
+${threadContext.replyingToUsername ? `REPLYING TO: @${threadContext.replyingToUsername}` : ''}`;
+
+      // Add previous replies for conversation awareness
+      if (threadContext.previousReplies && threadContext.previousReplies.length > 0) {
+        const sanitizedReplies = threadContext.previousReplies
+          .slice(0, 5)  // Limit to last 5 replies
+          .map((r, i) => `  ${i + 1}. "${sanitizeInput(r)}"`)
+          .join('\n');
+        threadContextSection += `\n\nPREVIOUS REPLIES IN THREAD (newest first):
+${sanitizedReplies}`;
+      }
+
+      threadContextSection += `\n
+⚠️ THREAD AWARENESS RULES:
+- Your reply should make sense in context of YOUR ORIGINAL POST
+- If their attack relates to something you said → address it specifically
+- If they're misquoting or strawmanning your post → call it out
+- Consider the conversation flow - don't repeat points already made
+- Reference specific things from your post if relevant (but stay brief)`;
+    }
+  }
+
   // Build recent replies section to prevent repetition
   const recentSection = recentReplies.length > 0
     ? `\n\n🚫 RECENTLY USED (DO NOT repeat or paraphrase these):\n${recentReplies.slice(0, 8).map(r => `- "${r}"`).join('\n')}\n\nBe DIFFERENT from the above. Fresh angle every time.`
@@ -709,7 +732,7 @@ ONLY respond to the TEXT they wrote.`;
 
   const prompt = `Generate ONE reply matching the style below. Lowercase, no quotes around your response.
 
-${styleGuide}
+${styleGuide}${threadContextSection}
 
 REAL EXAMPLES FROM USER (match this voice):
 ${exampleList.slice(0, 8).map((e, i) => `${i + 1}. "${e}"`).join('\n')}${ammoSection}${imageContext}${avoidList}${recentSection}
@@ -771,12 +794,9 @@ Reply (2-20 words, match the examples above, be unpredictable):`;
 }
 
 /**
- * Check if Gemini CLI is available
+ * Check if LLM provider is available
+ * Returns true if either Gemini SDK or OpenRouter is configured
  */
 export async function isGeminiAvailable(): Promise<boolean> {
-  return new Promise((resolve) => {
-    const proc = spawn('which', ['gemini']);
-    proc.on('close', (code) => resolve(code === 0));
-    proc.on('error', () => resolve(false));
-  });
+  return isLLMAvailable();
 }

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { SpotlightCard } from '@/components/ui/spotlight-card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,9 +8,12 @@ import {
   useIngestUrl,
   useIngestText,
   useDeleteSource,
-  useSearchAmmo
+  useSearchAmmo,
+  useVoiceDocuments,
+  useUploadVoiceDocument,
+  useDeleteVoiceDocument
 } from '@/hooks/useDocs';
-import { FileText, Link, FileUp, Search, Trash2, RefreshCw, BookOpen } from 'lucide-react';
+import { FileText, Link, FileUp, Search, Trash2, RefreshCw, BookOpen, Upload, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 
 export default function Docs() {
   const [urlInput, setUrlInput] = useState('');
@@ -18,13 +21,17 @@ export default function Docs() {
   const [textContent, setTextContent] = useState('');
   const [textName, setTextName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: sources, isLoading: sourcesLoading, refetch: refetchSources } = useSources();
+  const { data: voiceDocuments, refetch: refetchDocs } = useVoiceDocuments();
 
   const ingestUrl = useIngestUrl();
   const ingestText = useIngestText();
   const deleteSource = useDeleteSource();
   const searchAmmo = useSearchAmmo();
+  const uploadDocument = useUploadVoiceDocument();
+  const deleteDocument = useDeleteVoiceDocument();
 
   const handleIngestUrl = async () => {
     if (!urlInput.trim() || !urlName.trim()) {
@@ -67,6 +74,53 @@ export default function Docs() {
     await searchAmmo.mutateAsync({ query: searchQuery, topK: 5 });
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file size (10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      alert('File too large. Maximum size is 10MB.');
+      return;
+    }
+
+    // Validate file type
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (!['txt', 'md', 'pdf', 'docx'].includes(ext || '')) {
+      alert('Unsupported file type. Supported: txt, md, pdf, docx');
+      return;
+    }
+
+    try {
+      await uploadDocument.mutateAsync({ file });
+      alert('Document uploaded! Processing will begin shortly.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    } catch (err: any) {
+      alert('Error: ' + err.message);
+    }
+  };
+
+  const handleDeleteDocument = async (id: string, filename: string) => {
+    if (confirm(`Delete "${filename}"? This will also remove all extracted examples.`)) {
+      await deleteDocument.mutateAsync(id);
+    }
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case 'pending':
+        return <span className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">Pending</span>;
+      case 'processing':
+        return <span className="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />Processing</span>;
+      case 'completed':
+        return <span className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400 flex items-center gap-1"><CheckCircle className="w-3 h-3" />Completed</span>;
+      case 'failed':
+        return <span className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-400 flex items-center gap-1"><AlertCircle className="w-3 h-3" />Failed</span>;
+      default:
+        return null;
+    }
+  };
+
   return (
     <div className="space-y-8">
       {/* Header */}
@@ -76,6 +130,86 @@ export default function Docs() {
           Manage document sources and search your ammunition database.
         </p>
       </div>
+
+      {/* File Upload - Full Width */}
+      <SpotlightCard className="p-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Upload className="w-4 h-4 text-zinc-500" />
+          <h3 className="text-sm font-medium text-zinc-200">Upload Document</h3>
+        </div>
+        <div className="border-2 border-dashed border-zinc-700 rounded-lg p-8 text-center hover:border-orange-500/50 transition-colors">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.md,.pdf,.docx"
+            onChange={handleFileUpload}
+            className="hidden"
+            id="file-upload"
+          />
+          <label
+            htmlFor="file-upload"
+            className="cursor-pointer flex flex-col items-center gap-3"
+          >
+            <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center">
+              <Upload className="w-6 h-6 text-zinc-400" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-zinc-200">
+                {uploadDocument.isPending ? 'Uploading...' : 'Click to upload or drag & drop'}
+              </p>
+              <p className="text-xs text-zinc-500 mt-1">
+                PDF, DOCX, TXT, MD (max 10MB)
+              </p>
+            </div>
+          </label>
+        </div>
+        {uploadDocument.isPending && (
+          <div className="mt-3 flex items-center gap-2 text-sm text-zinc-400">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Uploading and processing...
+          </div>
+        )}
+      </SpotlightCard>
+
+      {/* Voice Documents List */}
+      {voiceDocuments && voiceDocuments.length > 0 && (
+        <SpotlightCard className="p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <FileText className="w-4 h-4 text-zinc-500" />
+              <h3 className="text-sm font-medium text-zinc-200">Voice Training Documents</h3>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => refetchDocs()} className="h-7 w-7 p-0">
+              <RefreshCw className="w-3 h-3" />
+            </Button>
+          </div>
+          <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2">
+            {voiceDocuments.map((doc) => (
+              <div key={doc.id} className="flex justify-between items-center p-3 bg-zinc-900/50 rounded-lg border border-zinc-800">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-zinc-200 truncate">{doc.filename}</span>
+                    {getStatusBadge(doc.status)}
+                  </div>
+                  {doc.status === 'completed' && doc.examples_created && (
+                    <p className="text-xs text-zinc-500 mt-1">{doc.examples_created} examples extracted</p>
+                  )}
+                  {doc.status === 'failed' && doc.error_message && (
+                    <p className="text-xs text-red-400 mt-1">{doc.error_message}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => handleDeleteDocument(doc.id, doc.filename)}
+                  className="text-red-400 hover:text-red-300 p-1 ml-2"
+                  disabled={deleteDocument.isPending}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </SpotlightCard>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
 

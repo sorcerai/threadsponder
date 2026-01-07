@@ -4,12 +4,15 @@ import {
   useFineTuneStats,
   usePatternScores,
   useUnratedReplies,
+  useFreshHostile,
   useBannedPhrases,
   useSubmitFeedback,
   useManualEval,
   useAutoEval,
   useAutoEvalBatch,
-  type AutoEvalScores
+  useClearPatterns,
+  useRemovePattern,
+  AutoEvalScores
 } from '@/hooks/useFineTune';
 import {
   ThumbsUp,
@@ -24,28 +27,31 @@ import {
   AlertTriangle,
   RefreshCw,
   Zap,
-  Brain
+  Brain,
+  MessageCircle,
+  Clock,
+  Trash2
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export default function FineTune() {
-  const { data: statsData } = useFineTuneStats();
+  const { data: statsData, isLoading: _statsLoading } = useFineTuneStats();
   const { data: patternsData, isLoading: patternsLoading } = usePatternScores();
   const { data: repliesData, isLoading: repliesLoading, refetch: refetchReplies, isFetching: repliesFetching } = useUnratedReplies(10);
+  const { data: freshData, isLoading: freshLoading, refetch: refetchFresh, isFetching: freshFetching } = useFreshHostile(20);
   const { phrases, addPhrase, removePhrase, isAdding, isRemoving } = useBannedPhrases();
   const submitFeedback = useSubmitFeedback();
-
-  const [newBannedPhrase, setNewBannedPhrase] = useState('');
-  const [ratingInProgress, setRatingInProgress] = useState<string | null>(null);
-
-  // Auto-eval state
-  const [autoEvalResults, setAutoEvalResults] = useState<Record<string, AutoEvalScores>>({});
-  const [autoEvalInProgress, setAutoEvalInProgress] = useState<string | null>(null);
-  const [batchEvalInProgress, setBatchEvalInProgress] = useState(false);
-
-  // Auto-eval hooks
   const autoEval = useAutoEval();
   const autoEvalBatch = useAutoEvalBatch();
+  const clearPatterns = useClearPatterns();
+  const removePattern = useRemovePattern();
+
+  const [activeTab, setActiveTab] = useState<'fresh' | 'responses'>('fresh');
+  const [newBannedPhrase, setNewBannedPhrase] = useState('');
+  const [ratingInProgress, setRatingInProgress] = useState<string | null>(null);
+  const [autoEvalResults, setAutoEvalResults] = useState<Record<string, AutoEvalScores>>({});
+  const [autoEvalErrors, setAutoEvalErrors] = useState<Record<string, string>>({});
+  const [autoEvalInProgress, setAutoEvalInProgress] = useState<string | null>(null);
 
   // Manual eval state
   const manualEval = useManualEval();
@@ -56,6 +62,7 @@ export default function FineTune() {
   const stats = statsData?.stats;
   const patterns = patternsData?.patterns || [];
   const unratedReplies = repliesData?.replies || [];
+  const freshComments = freshData?.comments || [];
 
   const handleRating = async (replyId: string, rating: 1 | -1) => {
     setRatingInProgress(replyId);
@@ -72,43 +79,7 @@ export default function FineTune() {
     setNewBannedPhrase('');
   };
 
-  // Auto-eval single reply
-  const handleAutoEval = async (replyId: string) => {
-    setAutoEvalInProgress(replyId);
-    try {
-      const result = await autoEval.mutateAsync({ replyId, saveFeedback: true });
-      setAutoEvalResults(prev => ({
-        ...prev,
-        [replyId]: result.scores
-      }));
-    } catch (error) {
-      console.error('Auto-eval failed:', error);
-    } finally {
-      setAutoEvalInProgress(null);
-    }
-  };
-
-  // Batch auto-eval all unrated
-  const handleBatchAutoEval = async () => {
-    setBatchEvalInProgress(true);
-    try {
-      await autoEvalBatch.mutateAsync({ limit: 20 });
-    } catch (error) {
-      console.error('Batch auto-eval failed:', error);
-    } finally {
-      setBatchEvalInProgress(false);
-    }
-  };
-
-  // Score color helper
-  const getScoreColor = (score: number): string => {
-    if (score >= 8) return 'text-green-400';
-    if (score >= 6) return 'text-yellow-400';
-    if (score >= 4) return 'text-orange-400';
-    return 'text-red-400';
-  };
-
-  // Select hostile for manual reply - pre-populate with AI's reply for tweaking
+  // Select comment for manual reply - pre-populate with AI's reply for tweaking
   const handleSelectForManual = (reply: typeof unratedReplies[0]) => {
     setSelectedForManual(reply.id);
     setManualHostile(reply.hostile.text);
@@ -129,6 +100,62 @@ export default function FineTune() {
     setManualHostile('');
     setManualReply('');
     setSelectedForManual(null);
+  };
+
+  // Auto-eval single reply
+  const handleAutoEval = async (replyId: string) => {
+    setAutoEvalInProgress(replyId);
+    setAutoEvalErrors(prev => {
+      const next = { ...prev };
+      delete next[replyId];
+      return next;
+    });
+    
+    try {
+      // Don't save feedback automatically - let user see scores first
+      const result = await autoEval.mutateAsync({ replyId, saveFeedback: false });
+      if (result.success) {
+        setAutoEvalResults(prev => ({ ...prev, [replyId]: result.scores }));
+      }
+    } catch (error: any) {
+      console.error('Auto-eval failed:', error);
+      setAutoEvalErrors(prev => ({ ...prev, [replyId]: error.message || 'Evaluation failed' }));
+    } finally {
+      setAutoEvalInProgress(null);
+    }
+  };
+
+  // Batch auto-eval all unrated replies
+  const handleBatchAutoEval = async () => {
+    // Clear previous errors
+    setAutoEvalErrors({});
+    
+    try {
+      const result = await autoEvalBatch.mutateAsync({ limit: 10 });
+      if (result.success) {
+        const newScores: Record<string, AutoEvalScores> = {};
+        const newErrors: Record<string, string> = {};
+        
+        for (const r of result.results) {
+          if (r.scores) {
+            newScores[r.replyId] = r.scores;
+          } else if (r.error) {
+            newErrors[r.replyId] = r.error;
+          }
+        }
+        setAutoEvalResults(prev => ({ ...prev, ...newScores }));
+        setAutoEvalErrors(prev => ({ ...prev, ...newErrors }));
+      }
+    } catch (error) {
+      console.error('Batch auto-eval failed:', error);
+    }
+  };
+
+  // Score color based on value (1-10 scale)
+  const getScoreColor = (score: number) => {
+    if (score >= 7) return 'text-green-400';
+    if (score >= 5) return 'text-yellow-400';
+    return 'text-red-400';
   };
 
   const getTrendIcon = (trend: 'improving' | 'declining' | 'stable') => {
@@ -152,21 +179,19 @@ export default function FineTune() {
             Rate replies to improve AI Agent behavior over time
           </p>
         </div>
-        {/* Batch Auto-Eval Button */}
-        {unratedReplies.length > 0 && (
-          <button
-            onClick={handleBatchAutoEval}
-            disabled={batchEvalInProgress}
-            className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all",
-              "bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 border border-purple-500/20",
-              "disabled:opacity-50 disabled:cursor-not-allowed"
-            )}
-          >
-            <Brain className={cn("w-4 h-4", batchEvalInProgress && "animate-pulse")} />
-            {batchEvalInProgress ? 'Evaluating...' : `Auto-Eval All (${unratedReplies.length})`}
-          </button>
-        )}
+        <button
+          onClick={handleBatchAutoEval}
+          disabled={autoEvalBatch.isPending || unratedReplies.length === 0}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all",
+            "bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 border border-purple-500/20",
+            "disabled:opacity-50 disabled:cursor-not-allowed"
+          )}
+          title="Auto-evaluate all unrated replies using AI"
+        >
+          <Brain className={cn("w-4 h-4", autoEvalBatch.isPending && "animate-pulse")} />
+          {autoEvalBatch.isPending ? 'Evaluating...' : 'Auto-Eval All'}
+        </button>
       </div>
 
       {/* Manual Eval Section - Write your own reply */}
@@ -193,15 +218,15 @@ export default function FineTune() {
         </div>
 
         <div className="space-y-4">
-          {/* Hostile comment input */}
+          {/* Original comment input */}
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">
-              Comment {selectedForManual && <span className="text-orange-400">(from list)</span>}
+              Original Comment {selectedForManual && <span className="text-orange-400">(from list)</span>}
             </label>
             <textarea
               value={manualHostile}
               onChange={(e) => setManualHostile(e.target.value)}
-              placeholder="Paste or type the comment here..."
+              placeholder="Paste or type the original comment here..."
               rows={2}
               className="w-full px-3 py-2 bg-black/20 border border-white/10 rounded-lg text-sm text-white placeholder:text-muted-foreground focus:outline-none focus:border-orange-500/50 resize-none"
             />
@@ -239,17 +264,17 @@ export default function FineTune() {
       </SpotlightCard>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Rate Replies Section - now with "use for manual" button */}
+        {/* Comments Section - with Fresh/Responses tabs */}
         <SpotlightCard className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-white">Hostile Comments</h2>
+            <h2 className="text-lg font-semibold text-white">Comments</h2>
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">
-                {unratedReplies.length} available
+                {activeTab === 'fresh' ? freshComments.length : unratedReplies.length} available
               </span>
               <button
-                onClick={() => refetchReplies()}
-                disabled={repliesFetching}
+                onClick={() => activeTab === 'fresh' ? refetchFresh() : refetchReplies()}
+                disabled={activeTab === 'fresh' ? freshFetching : repliesFetching}
                 className={cn(
                   "p-1.5 rounded-md transition-all",
                   "bg-white/5 hover:bg-white/10 text-muted-foreground hover:text-white",
@@ -257,34 +282,105 @@ export default function FineTune() {
                 )}
                 title="Refresh comments"
               >
-                <RefreshCw className={cn("w-4 h-4", repliesFetching && "animate-spin")} />
+                <RefreshCw className={cn("w-4 h-4", (freshFetching || repliesFetching) && "animate-spin")} />
               </button>
             </div>
           </div>
 
-          {repliesLoading ? (
-            <div className="text-center py-8 text-muted-foreground">Loading...</div>
-          ) : unratedReplies.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
-              <ThumbsUp className="w-8 h-8 mx-auto mb-2 opacity-50" />
-              <p>No comments available</p>
-            </div>
-          ) : (
-            <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
-              {unratedReplies.map((reply) => (
-                <div
-                  key={reply.id}
-                  className={cn(
-                    "p-4 rounded-lg border bg-black/20 space-y-3 cursor-pointer transition-all",
-                    selectedForManual === reply.id
-                      ? "border-orange-500/50 bg-orange-500/5"
-                      : "border-white/5 hover:border-white/10"
-                  )}
-                  onClick={() => handleSelectForManual(reply)}
-                >
-                  {/* Hostile comment */}
+          {/* Tabs */}
+          <div className="flex gap-2 mb-4">
+            <button
+              onClick={() => setActiveTab('fresh')}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all",
+                activeTab === 'fresh'
+                  ? "bg-green-500/20 text-green-400 border border-green-500/30"
+                  : "bg-white/5 text-muted-foreground hover:text-white hover:bg-white/10"
+              )}
+            >
+              <Clock className="w-3.5 h-3.5" />
+              Fresh ({freshComments.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('responses')}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all",
+                activeTab === 'responses'
+                  ? "bg-orange-500/20 text-orange-400 border border-orange-500/30"
+                  : "bg-white/5 text-muted-foreground hover:text-white hover:bg-white/10"
+              )}
+            >
+              <MessageCircle className="w-3.5 h-3.5" />
+              Responses ({unratedReplies.length})
+            </button>
+          </div>
+
+          {/* Fresh Tab Content */}
+          {activeTab === 'fresh' && (
+            freshLoading ? (
+              <div className="text-center py-8 text-muted-foreground">Loading...</div>
+            ) : freshComments.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <Clock className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                <p>No fresh comments yet</p>
+                <p className="text-xs mt-1">Comments will appear here as they come in</p>
+              </div>
+            ) : (
+              <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
+                {freshComments.map((comment) => (
+                  <div
+                    key={comment.id}
+                    className="p-4 rounded-lg border border-green-500/20 bg-green-500/5 space-y-2 cursor-pointer hover:border-green-500/40 transition-all"
+                    onClick={() => {
+                      setManualHostile(comment.text);
+                      setManualReply('');
+                      setSelectedForManual(comment.id);
+                    }}
+                  >
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs text-green-400">@{comment.username}</p>
+                      <span className="text-[10px] text-muted-foreground">
+                        {new Date(comment.capturedAt || comment.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <p className="text-sm text-white">"{comment.text}"</p>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-muted-foreground">
+                        Post: {comment.postId.slice(-8)}
+                      </span>
+                      <span className="text-[10px] text-green-400/50">Click to reply</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+
+          {/* Responses Tab Content */}
+          {activeTab === 'responses' && (
+            repliesLoading ? (
+              <div className="text-center py-8 text-muted-foreground">Loading...</div>
+            ) : unratedReplies.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <ThumbsUp className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                <p>No comments available</p>
+              </div>
+            ) : (
+              <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
+                {unratedReplies.map((reply) => (
+                  <div
+                    key={reply.id}
+                    className={cn(
+                      "p-4 rounded-lg border bg-black/20 space-y-3 cursor-pointer transition-all",
+                      selectedForManual === reply.id
+                        ? "border-orange-500/50 bg-orange-500/5"
+                        : "border-white/5 hover:border-white/10"
+                    )}
+                    onClick={() => handleSelectForManual(reply)}
+                  >
+                  {/* Original comment */}
                   <div>
-                    <p className="text-xs text-red-400 mb-1">
+                    <p className="text-xs text-orange-400 mb-1">
                       @{reply.hostile.user} ({reply.classification})
                     </p>
                     <p className="text-sm text-muted-foreground">
@@ -342,7 +438,7 @@ export default function FineTune() {
                       <ThumbsDown className="w-3 h-3" />
                     </button>
 
-                    {/* Auto-Eval Button (Zap) */}
+                    {/* Auto-eval button */}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -351,55 +447,82 @@ export default function FineTune() {
                       disabled={autoEvalInProgress === reply.id || autoEval.isPending}
                       className={cn(
                         "flex items-center gap-1 px-2 py-1 rounded text-xs transition-all ml-2",
-                        "bg-purple-500/10 text-purple-400 hover:bg-purple-500/20",
+                        "bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 border border-purple-500/20",
                         "disabled:opacity-50 disabled:cursor-not-allowed"
                       )}
-                      title="Auto-evaluate with AI"
+                      title="Auto-evaluate this reply with AI"
                     >
                       <Zap className={cn("w-3 h-3", autoEvalInProgress === reply.id && "animate-pulse")} />
+                      {autoEvalInProgress === reply.id ? '...' : 'AI'}
                     </button>
                   </div>
 
-                  {/* Auto-Eval Scores Display */}
+                  {/* Auto-eval Loading State */}
+                  {(autoEvalInProgress === reply.id || autoEvalBatch.isPending) && (
+                    <div className="pt-3 border-t border-purple-500/20 mt-2 animate-pulse">
+                      <div className="flex items-center gap-2 text-purple-400">
+                        <Brain className="w-4 h-4 animate-spin" />
+                        <span className="text-xs font-medium">AI Analyzing Reply...</span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-1 ml-6">
+                        Checking Context, Effort, Humanity, Freshness, and Status.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Auto-eval Error Display */}
+                  {autoEvalErrors[reply.id] && (
+                    <div className="pt-3 border-t border-red-500/20 mt-2">
+                      <div className="flex items-center gap-2 text-red-400">
+                        <AlertTriangle className="w-4 h-4" />
+                        <span className="text-xs font-medium">Analysis Failed</span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-1 ml-6">
+                        {autoEvalErrors[reply.id]}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Auto-eval score display */}
                   {autoEvalResults[reply.id] && (
-                    <div className="mt-3 pt-3 border-t border-white/5">
-                      <div className="text-[10px] text-muted-foreground mb-2">AI Evaluation Scores:</div>
-                      <div className="grid grid-cols-3 gap-2 text-xs">
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Context:</span>
-                          <span className={getScoreColor(autoEvalResults[reply.id].context_match)}>
-                            {autoEvalResults[reply.id].context_match}/10
-                          </span>
+                    <div className="pt-2 border-t border-purple-500/20 mt-2">
+                      <div className="flex items-center gap-1 mb-2">
+                        <Brain className="w-3 h-3 text-purple-400" />
+                        <span className="text-[10px] text-purple-400 font-medium">Auto-Eval Scores</span>
+                        <span className={cn("ml-auto text-sm font-bold", getScoreColor(autoEvalResults[reply.id].overall))}>
+                          {autoEvalResults[reply.id].overall.toFixed(1)}/10
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-5 gap-1 text-[9px]">
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Context</div>
+                          <div className={getScoreColor(autoEvalResults[reply.id].context_match)}>
+                            {autoEvalResults[reply.id].context_match.toFixed(1)}
+                          </div>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Effort:</span>
-                          <span className={getScoreColor(autoEvalResults[reply.id].effort_asymmetry)}>
-                            {autoEvalResults[reply.id].effort_asymmetry}/10
-                          </span>
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Effort</div>
+                          <div className={getScoreColor(autoEvalResults[reply.id].effort_asymmetry)}>
+                            {autoEvalResults[reply.id].effort_asymmetry.toFixed(1)}
+                          </div>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Human:</span>
-                          <span className={getScoreColor(autoEvalResults[reply.id].bot_detection)}>
-                            {autoEvalResults[reply.id].bot_detection}/10
-                          </span>
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Human</div>
+                          <div className={getScoreColor(autoEvalResults[reply.id].bot_detection)}>
+                            {autoEvalResults[reply.id].bot_detection.toFixed(1)}
+                          </div>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Fresh:</span>
-                          <span className={getScoreColor(autoEvalResults[reply.id].phrase_freshness)}>
-                            {autoEvalResults[reply.id].phrase_freshness}/10
-                          </span>
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Fresh</div>
+                          <div className={getScoreColor(autoEvalResults[reply.id].phrase_freshness)}>
+                            {autoEvalResults[reply.id].phrase_freshness.toFixed(1)}
+                          </div>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-muted-foreground">Status:</span>
-                          <span className={getScoreColor(autoEvalResults[reply.id].status_preservation)}>
-                            {autoEvalResults[reply.id].status_preservation}/10
-                          </span>
-                        </div>
-                        <div className="flex justify-between font-medium">
-                          <span className="text-white">Overall:</span>
-                          <span className={getScoreColor(autoEvalResults[reply.id].overall)}>
-                            {autoEvalResults[reply.id].overall}/10
-                          </span>
+                        <div className="text-center">
+                          <div className="text-muted-foreground">Status</div>
+                          <div className={getScoreColor(autoEvalResults[reply.id].status_preservation)}>
+                            {autoEvalResults[reply.id].status_preservation.toFixed(1)}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -407,12 +530,29 @@ export default function FineTune() {
                 </div>
               ))}
             </div>
+            )
           )}
         </SpotlightCard>
 
         {/* Pattern Scores Section */}
         <SpotlightCard className="p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">Pattern Scores</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-white">Pattern Scores</h2>
+            {patterns.length > 0 && (
+              <button
+                onClick={() => {
+                  if (confirm('Clear all pattern scores? This cannot be undone.')) {
+                    clearPatterns.mutate();
+                  }
+                }}
+                disabled={clearPatterns.isPending}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded transition-colors disabled:opacity-50"
+              >
+                <Trash2 className="w-3 h-3" />
+                {clearPatterns.isPending ? 'Clearing...' : 'Clear All'}
+              </button>
+            )}
+          </div>
 
           {patternsLoading ? (
             <div className="text-center py-8 text-muted-foreground">Loading...</div>
@@ -437,10 +577,18 @@ export default function FineTune() {
                       <span className={cn(
                         "text-sm font-bold",
                         pattern.score >= 0.7 ? "text-green-400" :
-                          pattern.score >= 0.4 ? "text-yellow-400" : "text-red-400"
+                        pattern.score >= 0.4 ? "text-yellow-400" : "text-red-400"
                       )}>
                         {Math.round(pattern.score * 100)}%
                       </span>
+                      <button
+                        onClick={() => removePattern.mutate(pattern.pattern)}
+                        disabled={removePattern.isPending}
+                        className="p-0.5 text-muted-foreground hover:text-red-400 transition-colors disabled:opacity-50"
+                        title="Remove pattern"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
                     </div>
                   </div>
 
@@ -450,7 +598,7 @@ export default function FineTune() {
                       className={cn(
                         "h-full transition-all",
                         pattern.score >= 0.7 ? "bg-green-500" :
-                          pattern.score >= 0.4 ? "bg-yellow-500" : "bg-red-500"
+                        pattern.score >= 0.4 ? "bg-yellow-500" : "bg-red-500"
                       )}
                       style={{ width: `${pattern.score * 100}%` }}
                     />

@@ -4,7 +4,7 @@
  * Validates Clerk JWT and extracts user context
  */
 
-import { Request, Response, NextFunction } from 'express';
+import { Request, Response, NextFunction, RequestHandler } from 'express';
 import { clerkClient, requireAuth } from '@clerk/express';
 import { createClient } from '@supabase/supabase-js';
 
@@ -69,7 +69,7 @@ async function getOrCreateAccount(clerkUserId: string): Promise<string | null> {
 /**
  * Middleware to require authentication and inject account context
  */
-export const authMiddleware = [
+export const authMiddleware: RequestHandler[] = [
   requireAuth(),
   async (req: Request, res: Response, next: NextFunction) => {
     try {

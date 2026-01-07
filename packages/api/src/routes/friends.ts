@@ -4,12 +4,12 @@
  * Manage friends list for banter/roast mode
  */
 
-import express, { Response } from 'express';
+import express, { Response, Router } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
-const router = express.Router();
+const router: Router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';

@@ -36,6 +36,7 @@ export interface ResponseContext {
   confidence?: number;  // P4: Confidence-based pivots
   recentReplies?: string[];  // Recent bot replies to avoid repetition
   attackVector?: AttackVector | null;  // P0: Loser Dossier attack angle
+  previousRepliesInThread?: string[];  // Previous replies in this thread for context
 }
 
 export interface GeneratedResponse {
@@ -127,8 +128,9 @@ function formatStylePrompt(
     instructions.push('Keep it casual');
   }
 
-  // Brevity matching with settings
-  const lengthSettings = settings?.response_lengths?.[classification] || { min: 3, max: 15 };
+  // Brevity matching with settings (skip classification uses neutral defaults)
+  const lengthKey = classification === 'skip' ? 'neutral' : classification;
+  const lengthSettings = settings?.response_lengths?.[lengthKey] || { min: 3, max: 15 };
   if (style.brevity === 'terse') {
     instructions.push(`Ultra short reply - ${lengthSettings.min}-${Math.min(lengthSettings.max, 5)} words max`);
   } else if (style.brevity === 'verbose') {
@@ -307,10 +309,30 @@ PRIORITY: This psychological weakness overrides generic hostile replies.
     ? `\n🚫 RECENTLY USED (DO NOT repeat or paraphrase):\n${ctx.recentReplies.slice(0, 8).map(r => `- "${r}"`).join('\n')}\n\nBe DIFFERENT from the above.`
     : '';
 
+  // Build thread context section for conversation awareness
+  let threadContextSection = '';
+  if (ctx.previousRepliesInThread && ctx.previousRepliesInThread.length > 0) {
+    const sanitizedReplies = ctx.previousRepliesInThread
+      .slice(0, 5)  // Limit to last 5 replies
+      .map((r, i) => `  ${i + 1}. "${r.substring(0, 200)}"`)  // Truncate long replies
+      .join('\n');
+    threadContextSection = `
+
+[THREAD CONTEXT - PREVIOUS REPLIES IN THIS CONVERSATION]
+${sanitizedReplies}
+
+⚠️ THREAD AWARENESS RULES:
+- Your reply should make sense in context of YOUR ORIGINAL POST
+- If their attack relates to something you said → address it specifically
+- If they're misquoting or strawmanning your post → call it out
+- Consider the conversation flow - don't repeat points already made
+- Reference specific things from your post if relevant (but stay brief)`;
+  }
+
   const prompt = `You are generating a social media reply. Be authentic and match the specified voice.
 
 ORIGINAL POST: "${ctx.originalPost}"
-THEIR REPLY (@${ctx.username}): "${ctx.replyText}"
+THEIR REPLY (@${ctx.username}): "${ctx.replyText}"${threadContextSection}
 CLASSIFICATION: ${ctx.classification}
 ${ctx.attackVector && ctx.attackVector.archetype !== 'NORMIE' ? `DOSSIER: ${ctx.attackVector.archetype} (${ctx.attackVector.data})` : ''}
 ${isFriend ? `RELATIONSHIP: Friend (${friendMode} mode)` : ''}

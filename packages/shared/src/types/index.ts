@@ -61,12 +61,18 @@ export interface Friend {
   updated_at: string;
 }
 
+export type ClassificationType = 'hostile' | 'friendly' | 'neutral';
+
 export interface FocusedPost {
   id: string;
   account_id: string;
   threads_account_id: string;
   post_id: string;
   post_text: string | null;
+  permalink_com: string | null;
+  permalink_net: string | null;
+  shortcode: string | null;
+  target_classifications: ClassificationType[];
   is_active: boolean;
   created_at: string;
   updated_at: string;

@@ -2,6 +2,35 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { useSocket } from './useSocket';
 
+// Achievement Stats Types
+interface DailyStats {
+    date: string;
+    hatersHandled: number;
+    wordsSaved: number;
+    hostileWordsDeflected: number;
+}
+
+interface AchievementStats {
+    today: {
+        hatersHandled: number;
+        minutesSaved: number;
+        wordsSaved: number;
+        hostileWordsDeflected: number;
+    };
+    allTime: {
+        hatersHandled: number;
+        minutesSaved: number;
+        wordsSaved: number;
+        hostileWordsDeflected: number;
+    };
+    streak: {
+        current: number;
+        best: number;
+        lastActiveDate: string | null;
+    };
+    recentDays: DailyStats[];
+}
+
 interface DashboardStats {
     status: string;
     uptime: number;
@@ -60,3 +89,23 @@ export function useStats() {
 
     return query;
 }
+
+/**
+ * useAchievements - Gamified stats for the achievements popup
+ * Shows time saved, haters handled, streaks, etc.
+ */
+export function useAchievements() {
+    return useQuery({
+        queryKey: ['stats', 'achievements'],
+        queryFn: async () => {
+            const res = await fetch('/api/stats/achievements');
+            const data = await res.json();
+            if (!data.success) throw new Error(data.error);
+            return data.stats as AchievementStats;
+        },
+        staleTime: 30000, // 30 seconds
+        refetchInterval: 60000, // Refresh every minute
+    });
+}
+
+export type { AchievementStats, DailyStats };

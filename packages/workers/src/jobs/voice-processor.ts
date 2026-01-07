@@ -14,9 +14,44 @@ import IORedis from 'ioredis';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import {
   generateEmbedding,
-  chunkText,
   classifyTone,
 } from '../services/embeddings.js';
+
+// Chonkie chunker instance (lazy-loaded)
+let chunkerInstance: any = null;
+
+/**
+ * Get or create Chonkie sentence chunker
+ * Uses Chonkie 0.2.6 for semantic sentence-based chunking
+ */
+async function getChunker() {
+  if (!chunkerInstance) {
+    const chonkie = await import('chonkie');
+    chunkerInstance = await chonkie.SentenceChunker.create({
+      chunkSize: 512,
+      chunkOverlap: 50,
+    });
+  }
+  return chunkerInstance;
+}
+
+/**
+ * Chunk text using Chonkie semantic chunking
+ */
+async function chunkTextWithChonkie(text: string): Promise<string[]> {
+  try {
+    const chunker = await getChunker();
+    const chunks = await chunker.chunk(text);
+    return chunks.map((c: any) => c.text || c);
+  } catch (error) {
+    console.warn('[VoiceProcessor] Chonkie failed, using fallback:', error);
+    // Fallback to simple paragraph splitting
+    return text
+      .split(/\n\n+/)
+      .map(p => p.trim())
+      .filter(p => p.length >= 20);
+  }
+}
 
 export interface VoiceProcessorJobData {
   accountId: string;
@@ -66,22 +101,39 @@ async function updateDocumentStatus(
 }
 
 /**
- * Extract text from document (supports .txt, .md, simple extraction)
- * For PDF/DOCX, would need additional libraries
+ * Extract text from document
+ * Supports: .txt, .md, .pdf, .docx
  */
 async function extractText(content: ArrayBuffer, filename: string): Promise<string> {
   const ext = filename.split('.').pop()?.toLowerCase();
+  const buffer = Buffer.from(content);
 
-  if (ext === 'txt' || ext === 'md') {
-    return new TextDecoder().decode(content);
-  }
+  switch (ext) {
+    case 'txt':
+    case 'md':
+      return new TextDecoder().decode(content);
 
-  // For now, treat everything as text
-  // TODO: Add PDF/DOCX parsing with pdf-parse, mammoth
-  try {
-    return new TextDecoder().decode(content);
-  } catch {
-    throw new Error(`Unsupported file type: ${ext}`);
+    case 'pdf': {
+      const pdfParse = await import('pdf-parse');
+      // pdf-parse exports differ between CJS/ESM, handle both
+      const parser = (pdfParse as any).default || pdfParse;
+      const pdfData = await parser(buffer);
+      return pdfData.text;
+    }
+
+    case 'docx': {
+      const mammoth = await import('mammoth');
+      const result = await mammoth.extractRawText({ buffer });
+      return result.value;
+    }
+
+    default:
+      // Fallback: try as plain text
+      try {
+        return new TextDecoder().decode(content);
+      } catch {
+        throw new Error(`Unsupported file type: ${ext}`);
+      }
   }
 }
 
@@ -122,9 +174,9 @@ async function processVoiceDocument(
 
     console.log(`[VoiceProcessor] Extracted ${text.length} chars from ${filename}`);
 
-    // Chunk the text
-    const chunks = chunkText(text, 400, 50);
-    console.log(`[VoiceProcessor] Created ${chunks.length} chunks`);
+    // Chunk the text using Chonkie semantic chunking
+    const chunks = await chunkTextWithChonkie(text);
+    console.log(`[VoiceProcessor] Created ${chunks.length} chunks (Chonkie)`);
 
     let examplesCreated = 0;
 
