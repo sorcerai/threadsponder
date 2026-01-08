@@ -10,6 +10,7 @@
 import { Worker, Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import cron from 'node-cron';
+import http from 'http';
 import {
   replyMonitorWorker,
   replyMonitorQueue,
@@ -21,67 +22,117 @@ import {
   scheduleMetricsJobs,
 } from './jobs/metrics-collector.js';
 
-const REDIS_URL = process.env.UPSTASH_REDIS_URL || 'redis://localhost:6379';
+const REDIS_URL = process.env.UPSTASH_REDIS_URL || '';
+const PORT = parseInt(process.env.PORT || '8080', 10);
 
-// Parse Redis URL for ioredis
-const connection = new IORedis(REDIS_URL, {
-  maxRetriesPerRequest: null,
+// Health check server for Cloud Run
+const healthServer = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
 });
 
-// Post Scheduler Queue
-export const postSchedulerQueue = new Queue('post-scheduler', { connection });
-
-// Voice Processor Queue
-export const voiceProcessorQueue = new Queue('voice-processor', { connection });
-
-// Post Scheduler Worker
-const postSchedulerWorker = new Worker(
-  'post-scheduler',
-  async (job) => {
-    const { scheduledPostId } = job.data;
-    console.log(`[PostScheduler] Publishing scheduled post: ${scheduledPostId}`);
-
-    // TODO: Implement post scheduling logic
-    // 1. Load scheduled post from Supabase
-    // 2. Publish to Threads API
-    // 3. Update status in Supabase
-  },
-  { connection }
-);
-
-postSchedulerWorker.on('completed', (job) => {
-  console.log(`[PostScheduler] Job ${job.id} completed`);
+healthServer.listen(PORT, () => {
+  console.log(`[Workers] Health server listening on port ${PORT}`);
 });
 
-postSchedulerWorker.on('failed', (job, err) => {
-  console.error(`[PostScheduler] Job ${job?.id} failed:`, err.message);
-});
+// Lazy Redis connection - only initialize if REDIS_URL is configured
+let _connection: IORedis | null = null;
 
-// Voice Processor Worker
-const voiceProcessorWorker = new Worker(
-  'voice-processor',
-  async (job) => {
-    const { accountId, documentId, storagePath } = job.data;
-    console.log(
-      `[VoiceProcessor] Processing document ${documentId} for account ${accountId}`
+function getConnection(): IORedis | null {
+  if (!REDIS_URL) {
+    console.warn('[Workers] UPSTASH_REDIS_URL not configured, Redis disabled');
+    return null;
+  }
+  if (!_connection) {
+    _connection = new IORedis(REDIS_URL, {
+      maxRetriesPerRequest: null,
+    });
+  }
+  return _connection;
+}
+
+// Post Scheduler Queue - lazy init
+let _postSchedulerQueue: Queue | null = null;
+export function getPostSchedulerQueue(): Queue | null {
+  const conn = getConnection();
+  if (!conn) return null;
+  if (!_postSchedulerQueue) {
+    _postSchedulerQueue = new Queue('post-scheduler', { connection: conn });
+  }
+  return _postSchedulerQueue;
+}
+
+// Voice Processor Queue - lazy init
+let _voiceProcessorQueue: Queue | null = null;
+export function getVoiceProcessorQueue(): Queue | null {
+  const conn = getConnection();
+  if (!conn) return null;
+  if (!_voiceProcessorQueue) {
+    _voiceProcessorQueue = new Queue('voice-processor', { connection: conn });
+  }
+  return _voiceProcessorQueue;
+}
+
+// Legacy exports for backward compatibility
+export const postSchedulerQueue = null as unknown as Queue;
+export const voiceProcessorQueue = null as unknown as Queue;
+
+// Post Scheduler Worker - lazy init
+let _postSchedulerWorker: Worker | null = null;
+function getPostSchedulerWorker(): Worker | null {
+  const conn = getConnection();
+  if (!conn) return null;
+  if (!_postSchedulerWorker) {
+    _postSchedulerWorker = new Worker(
+      'post-scheduler',
+      async (job) => {
+        const { scheduledPostId } = job.data;
+        console.log(`[PostScheduler] Publishing scheduled post: ${scheduledPostId}`);
+        // TODO: Implement post scheduling logic
+      },
+      { connection: conn }
     );
+    _postSchedulerWorker.on('completed', (job) => {
+      console.log(`[PostScheduler] Job ${job.id} completed`);
+    });
+    _postSchedulerWorker.on('failed', (job, err) => {
+      console.error(`[PostScheduler] Job ${job?.id} failed:`, err.message);
+    });
+  }
+  return _postSchedulerWorker;
+}
 
-    // TODO: Implement voice processing logic
-    // 1. Download document from Supabase Storage
-    // 2. Chunk document into examples
-    // 3. Generate embeddings via OpenRouter
-    // 4. Store in voice_examples table
-  },
-  { connection }
-);
-
-voiceProcessorWorker.on('completed', (job) => {
-  console.log(`[VoiceProcessor] Job ${job.id} completed`);
-});
-
-voiceProcessorWorker.on('failed', (job, err) => {
-  console.error(`[VoiceProcessor] Job ${job?.id} failed:`, err.message);
-});
+// Voice Processor Worker - lazy init
+let _voiceProcessorWorker: Worker | null = null;
+function getVoiceProcessorWorker(): Worker | null {
+  const conn = getConnection();
+  if (!conn) return null;
+  if (!_voiceProcessorWorker) {
+    _voiceProcessorWorker = new Worker(
+      'voice-processor',
+      async (job) => {
+        const { accountId, documentId, storagePath } = job.data;
+        console.log(
+          `[VoiceProcessor] Processing document ${documentId} for account ${accountId}`
+        );
+        // TODO: Implement voice processing logic
+      },
+      { connection: conn }
+    );
+    _voiceProcessorWorker.on('completed', (job) => {
+      console.log(`[VoiceProcessor] Job ${job.id} completed`);
+    });
+    _voiceProcessorWorker.on('failed', (job, err) => {
+      console.error(`[VoiceProcessor] Job ${job?.id} failed:`, err.message);
+    });
+  }
+  return _voiceProcessorWorker;
+}
 
 // Schedule reply monitoring every minute
 cron.schedule('* * * * *', async () => {
@@ -110,17 +161,23 @@ cron.schedule('*/5 * * * *', async () => {
   }
 });
 
-console.log('[Workers] All workers started');
+// Initialize workers if Redis is configured
+if (REDIS_URL) {
+  getPostSchedulerWorker();
+  getVoiceProcessorWorker();
+  console.log('[Workers] All workers started');
+} else {
+  console.warn('[Workers] Redis not configured - workers disabled, only health server running');
+}
 console.log('[Workers] Cron schedulers running');
 
 // Graceful shutdown
 async function shutdown() {
   console.log('[Workers] Shutting down...');
-  await replyMonitorWorker.close();
-  await postSchedulerWorker.close();
-  await voiceProcessorWorker.close();
-  await metricsCollectorWorker.close();
-  await connection.quit();
+  if (_postSchedulerWorker) await _postSchedulerWorker.close();
+  if (_voiceProcessorWorker) await _voiceProcessorWorker.close();
+  if (_connection) await _connection.quit();
+  healthServer.close();
   process.exit(0);
 }
 
