@@ -19,7 +19,17 @@ const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID || ''; // Monthly price
 const STRIPE_TRIAL_PRICE_ID = process.env.STRIPE_TRIAL_PRICE_ID || ''; // $1 trial price
 const APP_URL = process.env.APP_URL || 'http://localhost:3000';
 
-const stripe = new Stripe(STRIPE_SECRET_KEY);
+// Lazy init Stripe - only when routes are called
+let _stripe: Stripe | null = null;
+function getStripe(): Stripe {
+  if (!_stripe) {
+    if (!STRIPE_SECRET_KEY) {
+      throw new Error('STRIPE_SECRET_KEY is not configured');
+    }
+    _stripe = new Stripe(STRIPE_SECRET_KEY);
+  }
+  return _stripe;
+}
 
 function getSupabase() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -103,7 +113,7 @@ router.post('/checkout/trial', async (req, res: Response) => {
     let customerId = account.stripe_customer_id;
 
     if (!customerId) {
-      const customer = await stripe.customers.create({
+      const customer = await getStripe().customers.create({
         email: account.email,
         metadata: { accountId },
       });
@@ -116,7 +126,7 @@ router.post('/checkout/trial', async (req, res: Response) => {
     }
 
     // Create checkout session for $1 trial
-    const session = await stripe.checkout.sessions.create({
+    const session = await getStripe().checkout.sessions.create({
       customer: customerId,
       payment_method_types: ['card'],
       line_items: [
@@ -161,7 +171,7 @@ router.post('/checkout/subscribe', async (req, res: Response) => {
     let customerId = account.stripe_customer_id;
 
     if (!customerId) {
-      const customer = await stripe.customers.create({
+      const customer = await getStripe().customers.create({
         email: account.email,
         metadata: { accountId },
       });
@@ -174,7 +184,7 @@ router.post('/checkout/subscribe', async (req, res: Response) => {
     }
 
     // Create checkout session for subscription
-    const session = await stripe.checkout.sessions.create({
+    const session = await getStripe().checkout.sessions.create({
       customer: customerId,
       payment_method_types: ['card'],
       line_items: [
@@ -219,7 +229,7 @@ router.post('/portal', async (req, res: Response) => {
       return res.status(400).json({ error: 'No billing account found' });
     }
 
-    const session = await stripe.billingPortal.sessions.create({
+    const session = await getStripe().billingPortal.sessions.create({
       customer: account.stripe_customer_id,
       return_url: `${APP_URL}/dashboard/settings/billing`,
     });
@@ -245,7 +255,7 @@ router.post(
 
     try {
       // Verify webhook signature
-      event = stripe.webhooks.constructEvent(
+      event = getStripe().webhooks.constructEvent(
         req.body, // Must be raw body
         sig,
         STRIPE_WEBHOOK_SECRET
