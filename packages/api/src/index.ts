@@ -494,7 +494,7 @@ export async function bootstrap(startServer = false): Promise<{ app: Express; io
 
   // Start server if running standalone
   if (startServer && !isServerless) {
-    const port = process.env.DASHBOARD_PORT || 3008;
+    const port = process.env.PORT || process.env.DASHBOARD_PORT || 3008;
     app.listen(port, () => {
       logger.info(`API running on http://localhost:${port}`);
     });
