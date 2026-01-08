@@ -15,11 +15,23 @@ const router: Router = express.Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
-const REDIS_URL = process.env.UPSTASH_REDIS_URL || 'redis://localhost:6379';
+const REDIS_URL = process.env.UPSTASH_REDIS_URL || '';
 
-// BullMQ queue for voice document processing
-const redisConnection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
-const voiceProcessorQueue = new Queue('voice-processor', { connection: redisConnection });
+// BullMQ queue for voice document processing - lazy init
+let _redisConnection: IORedis | null = null;
+let _voiceProcessorQueue: Queue | null = null;
+
+function getVoiceQueue(): Queue | null {
+  if (!REDIS_URL) {
+    console.warn('[Voice] UPSTASH_REDIS_URL not configured, queue disabled');
+    return null;
+  }
+  if (!_voiceProcessorQueue) {
+    _redisConnection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
+    _voiceProcessorQueue = new Queue('voice-processor', { connection: _redisConnection });
+  }
+  return _voiceProcessorQueue;
+}
 
 // Constants
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -316,19 +328,25 @@ router.post('/documents/upload', async (req, res: Response) => {
 
     if (error) throw error;
 
-    // Queue voice processor job
-    const job = await voiceProcessorQueue.add('process', {
-      accountId,
-      documentId: data.id,
-      storagePath,
-    });
-
-    console.log(`[Voice] Uploaded ${filename} and queued for processing (job: ${job.id})`);
+    // Queue voice processor job (if queue available)
+    const queue = getVoiceQueue();
+    let jobId = null;
+    if (queue) {
+      const job = await queue.add('process', {
+        accountId,
+        documentId: data.id,
+        storagePath,
+      });
+      jobId = job.id;
+      console.log(`[Voice] Uploaded ${filename} and queued for processing (job: ${job.id})`);
+    } else {
+      console.log(`[Voice] Uploaded ${filename} (queue not available)`);
+    }
 
     res.json({
       success: true,
       document: data,
-      jobId: job.id
+      jobId
     });
   } catch (error) {
     console.error('[Voice] Failed to upload document:', error);
@@ -446,19 +464,25 @@ router.post('/documents', async (req, res: Response) => {
 
     if (error) throw error;
 
-    // Queue voice processor job
-    const job = await voiceProcessorQueue.add('process', {
-      accountId,
-      documentId: data.id,
-      storagePath,
-    });
-
-    console.log(`[Voice] Queued document ${data.id} for processing (job: ${job.id})`);
+    // Queue voice processor job (if queue available)
+    const queue = getVoiceQueue();
+    let jobId = null;
+    if (queue) {
+      const job = await queue.add('process', {
+        accountId,
+        documentId: data.id,
+        storagePath,
+      });
+      jobId = job.id;
+      console.log(`[Voice] Queued document ${data.id} for processing (job: ${job.id})`);
+    } else {
+      console.log(`[Voice] Document ${data.id} saved (queue not available)`);
+    }
 
     res.json({
       success: true,
       document: data,
-      jobId: job.id
+      jobId
     });
   } catch (error) {
     console.error('[Voice] Failed to upload document:', error);
