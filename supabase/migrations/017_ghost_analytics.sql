@@ -133,21 +133,21 @@ ALTER TABLE post_performance ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "post_metrics_select" ON post_metrics
   FOR SELECT USING (
     account_id IN (
-      SELECT id FROM accounts WHERE user_id = auth.uid()
+      SELECT id FROM accounts WHERE clerk_user_id = current_setting('app.clerk_user_id', true)
     )
   );
 
 CREATE POLICY "post_metrics_insert" ON post_metrics
   FOR INSERT WITH CHECK (
     account_id IN (
-      SELECT id FROM accounts WHERE user_id = auth.uid()
+      SELECT id FROM accounts WHERE clerk_user_id = current_setting('app.clerk_user_id', true)
     )
   );
 
 CREATE POLICY "post_metrics_update" ON post_metrics
   FOR UPDATE USING (
     account_id IN (
-      SELECT id FROM accounts WHERE user_id = auth.uid()
+      SELECT id FROM accounts WHERE clerk_user_id = current_setting('app.clerk_user_id', true)
     )
   );
 
@@ -155,14 +155,14 @@ CREATE POLICY "post_metrics_update" ON post_metrics
 CREATE POLICY "velocity_baseline_select" ON account_velocity_baseline
   FOR SELECT USING (
     account_id IN (
-      SELECT id FROM accounts WHERE user_id = auth.uid()
+      SELECT id FROM accounts WHERE clerk_user_id = current_setting('app.clerk_user_id', true)
     )
   );
 
 CREATE POLICY "velocity_baseline_all" ON account_velocity_baseline
   FOR ALL USING (
     account_id IN (
-      SELECT id FROM accounts WHERE user_id = auth.uid()
+      SELECT id FROM accounts WHERE clerk_user_id = current_setting('app.clerk_user_id', true)
     )
   );
 
@@ -170,14 +170,14 @@ CREATE POLICY "velocity_baseline_all" ON account_velocity_baseline
 CREATE POLICY "post_performance_select" ON post_performance
   FOR SELECT USING (
     account_id IN (
-      SELECT id FROM accounts WHERE user_id = auth.uid()
+      SELECT id FROM accounts WHERE clerk_user_id = current_setting('app.clerk_user_id', true)
     )
   );
 
 CREATE POLICY "post_performance_all" ON post_performance
   FOR ALL USING (
     account_id IN (
-      SELECT id FROM accounts WHERE user_id = auth.uid()
+      SELECT id FROM accounts WHERE clerk_user_id = current_setting('app.clerk_user_id', true)
     )
   );
 

@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
 CREATE INDEX IF NOT EXISTS usage_events_account_id_idx ON usage_events(account_id);
 CREATE INDEX IF NOT EXISTS usage_events_created_at_idx ON usage_events(account_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS usage_events_type_idx ON usage_events(account_id, event_type);
-CREATE INDEX IF NOT EXISTS usage_events_day_idx ON usage_events(account_id, DATE_TRUNC('day', created_at));
+-- Day index removed: created_at index handles date-based queries with range scans
 
 -- Enable RLS
 ALTER TABLE usage_events ENABLE ROW LEVEL SECURITY;
