@@ -34,7 +34,7 @@ export interface ThreadsCredentials {
 }
 
 // Encryption key from environment (32 bytes for AES-256)
-const ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY || '';
+const ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY || process.env.CREDENTIAL_ENCRYPTION_KEY || '';
 
 /**
  * Decrypt an encrypted token
@@ -271,31 +271,11 @@ export class TenantService {
   }
 
   /**
-   * Check if subscription is active
+   * Check if subscription is active.
+   * Standalone mode: always active.
    */
-  async isSubscriptionActive(accountId: string): Promise<boolean> {
-    const { data, error } = await this.supabase
-      .from('accounts')
-      .select('subscription_status, subscription_ends_at')
-      .eq('id', accountId)
-      .single();
-
-    if (error || !data) {
-      return false;
-    }
-
-    const { subscription_status, subscription_ends_at } = data;
-
-    // Trial or active subscription
-    if (subscription_status === 'active') {
-      return true;
-    }
-
-    if (subscription_status === 'trial' && subscription_ends_at) {
-      return new Date(subscription_ends_at) > new Date();
-    }
-
-    return false;
+  async isSubscriptionActive(_accountId: string): Promise<boolean> {
+    return true;
   }
 }
 

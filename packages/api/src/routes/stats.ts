@@ -8,14 +8,9 @@ import express, { Request, Response, Router } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 import { tenantKeys, tenantPattern, getRedisClient } from '@threadsponder/shared';
 
-/**
- * Get organization ID from request context.
- * In development, uses 'default' org. In production, will be from Clerk auth.
- */
 function getOrgId(req: Request): string {
-  // TODO: Replace with Clerk auth context when integrated
-  // return req.auth?.orgId || 'default';
-  return (req.headers['x-org-id'] as string) || process.env.DEFAULT_ORG_ID || 'default';
+  const auth = (req as unknown as AuthenticatedRequest).auth;
+  return auth?.accountId || process.env.DEFAULT_ORG_ID || 'default';
 }
 
 const router: Router = express.Router();

@@ -16,6 +16,7 @@ import {
   getReportHistory,
   EODReport,
 } from '../services/eod-report-service.js';
+import { AuthenticatedRequest } from '../middleware/auth.js';
 
 const router: Router = Router();
 
@@ -26,28 +27,9 @@ function getSupabase() {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 }
 
-/**
- * Get account ID from authenticated request
- */
-async function getAccountId(req: Request): Promise<string | null> {
-  // Get Clerk user ID from auth middleware
-  const clerkUserId = (req as any).auth?.userId;
-  if (!clerkUserId) {
-    return null;
-  }
-
-  const supabase = getSupabase();
-  const { data, error } = await supabase
-    .from('accounts')
-    .select('id')
-    .eq('clerk_user_id', clerkUserId)
-    .single();
-
-  if (error || !data) {
-    return null;
-  }
-
-  return data.id;
+function getAccountId(req: Request): string | null {
+  const auth = (req as unknown as AuthenticatedRequest).auth;
+  return auth?.accountId || null;
 }
 
 /**

@@ -637,9 +637,7 @@ Match their energy. Acknowledge without overdoing it. No sycophantic praise.`;
   if (classification === 'hostile' && isRant) {
     try {
       const research = getResearchProvider();
-      // TODO: Phase 3 - Pass orgId from caller context (multi-tenant migration)
-      const defaultOrgId = process.env.DEFAULT_ORG_ID || 'default';
-      const ammoResults = await research.searchAmmo(defaultOrgId, safeReply, 5);  // Get 5 for variety
+      const ammoResults = await research.searchAmmo(orgId, safeReply, 5);  // Get 5 for variety
       if (ammoResults.length > 0) {
         ammoSection = `\n\n[AMMUNITION - PICK ONE fact to use, rotate sources]
 ${research.formatAmmoForPrompt(ammoResults)}

@@ -123,7 +123,39 @@ router.post('/examples', async (req, res: Response) => {
 
     if (error) throw error;
 
-    // TODO: Queue embedding generation job
+    // Fire-and-forget embedding generation after response
+    const exampleId = data.id;
+    const exampleText = parsed.data.text;
+
+    (async () => {
+      try {
+        const apiKey = process.env.OPENROUTER_API_KEY || '';
+        if (!apiKey) return;
+        const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+            'HTTP-Referer': 'https://threadsponder.com',
+            'X-Title': 'Threadsponder',
+          },
+          body: JSON.stringify({
+            model: 'openai/text-embedding-3-large',
+            input: exampleText,
+            dimensions: 1024,
+          }),
+        });
+        if (response.ok) {
+          const result = await response.json() as { data?: Array<{ embedding?: number[] }> };
+          const embedding = result.data?.[0]?.embedding;
+          if (embedding) {
+            await getSupabase().from('voice_examples').update({ embedding }).eq('id', exampleId);
+          }
+        }
+      } catch (err) {
+        console.warn('[Voice] Background embedding generation failed:', err);
+      }
+    })();
 
     res.json({ success: true, example: data });
   } catch (error) {

@@ -5,14 +5,21 @@
  * Keep Claude Code for quality reply generation where voice matters
  */
 
-import { logger } from './shared-logger.js';
+import { logger } from "./shared-logger.js";
 
-const Z_AI_URL = 'https://api.z.ai/api/coding/paas/v4/chat/completions';
-const Z_AI_KEY = process.env.Z_AI_API_KEY || '01f41e39716a47b9aa2bd74daeb4a102.r8vqzbIITX47eWPS';
-const MODEL = 'glm-4.7';
+const Z_AI_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions";
+const Z_AI_KEY = process.env.Z_AI_API_KEY;
+const MODEL = "glm-4.7";
+
+// Validate API key is configured
+if (!Z_AI_KEY) {
+  console.warn(
+    "[FastClassifier] Z_AI_API_KEY not configured - fast classification will fail",
+  );
+}
 
 interface ClassificationResult {
-  classification: 'friendly' | 'neutral' | 'hostile';
+  classification: "friendly" | "neutral" | "hostile";
   confidence: number;
   reasoning: string;
 }
@@ -25,7 +32,7 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 
 async function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -67,7 +74,7 @@ const META_COMMENT_PATTERNS = [
   /\b(talking to (a |an )?(bot|AI|algorithm))\b/gi,
   /\b(clearly (a |an )?(bot|automated|AI))\b/gi,
   /\b(script(ed)? response)\b/gi,
-  /\b(NPC energy|NPC response)\b/gi
+  /\b(NPC energy|NPC response)\b/gi,
 ];
 
 /**
@@ -107,41 +114,43 @@ export function containsInjectionAttempt(text: string): boolean {
 }
 
 function sanitizeInput(text: string): string {
-  if (!text) return '';
+  if (!text) return "";
 
   // Truncate to safe length first
   let sanitized = text.substring(0, 500);
 
   // Remove injection patterns
   for (const pattern of INJECTION_PATTERNS) {
-    sanitized = sanitized.replace(pattern, '[filtered]');
+    sanitized = sanitized.replace(pattern, "[filtered]");
     pattern.lastIndex = 0; // Reset for global patterns
   }
 
   // Escape special characters that could be used for injection
   sanitized = sanitized
-    .replace(/\\/g, '\\\\')
+    .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
-    .replace(/\n/g, ' ')
-    .replace(/\r/g, ' ')
-    .replace(/\t/g, ' ');
+    .replace(/\n/g, " ")
+    .replace(/\r/g, " ")
+    .replace(/\t/g, " ");
 
   return sanitized.trim();
 }
 
-async function callGLMApi(prompt: string): Promise<ClassificationResult | null> {
+async function callGLMApi(
+  prompt: string,
+): Promise<ClassificationResult | null> {
   const response = await fetch(Z_AI_URL, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${Z_AI_KEY}`
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${Z_AI_KEY}`,
     },
     body: JSON.stringify({
       model: MODEL,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
-      max_tokens: 500  // Increased to accommodate reasoning + actual response
-    })
+      max_tokens: 500, // Increased to accommodate reasoning + actual response
+    }),
   });
 
   if (!response.ok) {
@@ -150,21 +159,26 @@ async function callGLMApi(prompt: string): Promise<ClassificationResult | null> 
     return null;
   }
 
-  const data = await response.json() as {
-    choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
+  const data = (await response.json()) as {
+    choices?: Array<{
+      message?: { content?: string; reasoning_content?: string };
+    }>;
   };
   // GLM-4.7 may put response in content OR reasoning_content - check both
-  let content = data.choices?.[0]?.message?.content || '';
-  const reasoning = data.choices?.[0]?.message?.reasoning_content || '';
+  let content = data.choices?.[0]?.message?.content || "";
+  const reasoning = data.choices?.[0]?.message?.reasoning_content || "";
 
   // If content is empty but reasoning exists, try to extract JSON from reasoning
   if (!content && reasoning) {
-    logger.info('GLM response in reasoning_content, extracting...');
+    logger.info("GLM response in reasoning_content, extracting...");
     content = reasoning;
   }
 
   // Parse JSON from response - GLM wraps in markdown code blocks
-  const cleanContent = content.replace(/```json\s*\n?/g, '').replace(/```\s*$/g, '').trim();
+  const cleanContent = content
+    .replace(/```json\s*\n?/g, "")
+    .replace(/```\s*$/g, "")
+    .trim();
   const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
 
   if (jsonMatch) {
@@ -172,34 +186,55 @@ async function callGLMApi(prompt: string): Promise<ClassificationResult | null> 
       const result = JSON.parse(jsonMatch[0]);
 
       // Validate classification is one of the expected values
-      const validClassifications = ['friendly', 'neutral', 'hostile'];
+      const validClassifications = ["friendly", "neutral", "hostile"];
       if (!validClassifications.includes(result.classification)) {
-        logger.warn(`Invalid classification from GLM: "${result.classification}", defaulting to hostile`);
+        logger.warn(
+          `Invalid classification from GLM: "${result.classification}", defaulting to hostile`,
+        );
         return {
-          classification: 'hostile',
+          classification: "hostile",
           confidence: 0.5,
-          reasoning: `Invalid GLM classification: ${result.classification}`
+          reasoning: `Invalid GLM classification: ${result.classification}`,
         };
       }
 
       return {
-        classification: result.classification as 'friendly' | 'neutral' | 'hostile',
+        classification: result.classification as
+          | "friendly"
+          | "neutral"
+          | "hostile",
         confidence: result.confidence ?? 0.7,
-        reasoning: result.reasoning ?? 'No reasoning provided'
+        reasoning: result.reasoning ?? "No reasoning provided",
       };
     } catch (e) {
-      logger.warn('Failed to parse JSON from GLM response');
+      logger.warn("Failed to parse JSON from GLM response");
       return null;
     }
   }
 
   // Fallback: try to detect classification from text
   const lowerContent = cleanContent.toLowerCase();
-  if (lowerContent.includes('hostile') || lowerContent.includes('attack') || lowerContent.includes('insult')) {
-    return { classification: 'hostile', confidence: 0.7, reasoning: 'Detected from reasoning text' };
+  if (
+    lowerContent.includes("hostile") ||
+    lowerContent.includes("attack") ||
+    lowerContent.includes("insult")
+  ) {
+    return {
+      classification: "hostile",
+      confidence: 0.7,
+      reasoning: "Detected from reasoning text",
+    };
   }
-  if (lowerContent.includes('friendly') || lowerContent.includes('support') || lowerContent.includes('positive')) {
-    return { classification: 'friendly', confidence: 0.7, reasoning: 'Detected from reasoning text' };
+  if (
+    lowerContent.includes("friendly") ||
+    lowerContent.includes("support") ||
+    lowerContent.includes("positive")
+  ) {
+    return {
+      classification: "friendly",
+      confidence: 0.7,
+      reasoning: "Detected from reasoning text",
+    };
   }
 
   return null;
@@ -213,22 +248,22 @@ async function callGLMApi(prompt: string): Promise<ClassificationResult | null> 
 export async function classifyReplyFast(
   originalPost: string,
   replyText: string,
-  username: string
+  username: string,
 ): Promise<ClassificationResult> {
   // Check for injection attempts - skip processing entirely
   if (containsInjectionAttempt(replyText)) {
     logger.info(`Skipping @${username} - injection attempt detected`);
     return {
-      classification: 'neutral',
+      classification: "neutral",
       confidence: 0,
-      reasoning: 'INJECTION_DETECTED: Comment ignored for security'
+      reasoning: "INJECTION_DETECTED: Comment ignored for security",
     };
   }
 
   // Sanitize inputs to prevent prompt injection
   const safeOriginal = sanitizeInput(originalPost);
   const safeReply = sanitizeInput(replyText);
-  const safeUsername = sanitizeInput(username).replace(/[^a-zA-Z0-9_]/g, '');
+  const safeUsername = sanitizeInput(username).replace(/[^a-zA-Z0-9_]/g, "");
 
   const prompt = `Classify this social media reply. Output ONLY valid JSON, no markdown.
 
@@ -246,7 +281,9 @@ Output format: {"classification": "friendly"|"neutral"|"hostile", "confidence": 
     try {
       const result = await callGLMApi(prompt);
       if (result) {
-        logger.info(`Fast classified @${username}: ${result.classification} (${result.confidence}) [attempt ${attempt}]`);
+        logger.info(
+          `Fast classified @${username}: ${result.classification} (${result.confidence}) [attempt ${attempt}]`,
+        );
         return result;
       }
 
@@ -262,15 +299,17 @@ Output format: {"classification": "friendly"|"neutral"|"hostile", "confidence": 
     }
   }
 
-  logger.warn(`All ${MAX_RETRIES} GLM attempts failed for @${username}, defaulting to neutral`);
-  return defaultClassification('All retries failed');
+  logger.warn(
+    `All ${MAX_RETRIES} GLM attempts failed for @${username}, defaulting to neutral`,
+  );
+  return defaultClassification("All retries failed");
 }
 
 function defaultClassification(reason: string): ClassificationResult {
   return {
-    classification: 'neutral',
+    classification: "neutral",
     confidence: 0.5,
-    reasoning: `Classification failed: ${reason}. Defaulting to neutral.`
+    reasoning: `Classification failed: ${reason}. Defaulting to neutral.`,
   };
 }
 
@@ -284,11 +323,11 @@ export async function generateReplyFast(
   originalPost: string,
   replyText: string,
   username: string,
-  classification: 'friendly' | 'neutral' | 'hostile'
+  classification: "friendly" | "neutral" | "hostile",
 ): Promise<string> {
   // Sanitize inputs to prevent prompt injection
   const safeReply = sanitizeInput(replyText);
-  const safeUsername = sanitizeInput(username).replace(/[^a-zA-Z0-9_]/g, '');
+  const safeUsername = sanitizeInput(username).replace(/[^a-zA-Z0-9_]/g, "");
 
   const examples = {
     friendly: [
@@ -296,13 +335,13 @@ export async function generateReplyFast(
       "hell yeah",
       "shits bonkers",
       "appreciate it fr",
-      "wild. love to see it"
+      "wild. love to see it",
     ],
     neutral: [
       "interesting.",
       "try [thing]. worked for me",
       "that's what i use",
-      "check the docs"
+      "check the docs",
     ],
     hostile: [
       // RAGEBAIT STYLE - dunk with data/logic, use 💀 or 🤔
@@ -310,18 +349,19 @@ export async function generateReplyFast(
       "same energy as complaining about calculators 💀",
       "skill issue tbh",
       "and yet you're still here 🤔",
-      "cool. anyway."
-    ]
+      "cool. anyway.",
+    ],
   };
 
-  const hostileInstructions = classification === 'hostile'
-    ? `\nRAGEBAIT RULES:
+  const hostileInstructions =
+    classification === "hostile"
+      ? `\nRAGEBAIT RULES:
 - dunk with logic, not emotion
 - use 💀 or 🤔 for smirk energy
 - expose their hypocrisy if possible
 - never defensive, always on offense
 - make them look absurd with facts`
-    : '';
+      : "";
 
   // Use a simpler, more direct prompt that doesn't trigger reasoning mode
   const prompt = `Reply to this comment in 60 chars or less. lowercase. no explanation.
@@ -330,24 +370,24 @@ Examples: "${examples[classification][0]}" | "${examples[classification][1]}" | 
 
 Comment: "${safeReply}"
 
-${classification === 'hostile' ? 'Dunk with logic. Use 💀 or 🤔 if exposing hypocrisy.' : ''}
+${classification === "hostile" ? "Dunk with logic. Use 💀 or 🤔 if exposing hypocrisy." : ""}
 
 Your reply:`;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const response = await fetch(Z_AI_URL, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${Z_AI_KEY}`
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${Z_AI_KEY}`,
         },
         body: JSON.stringify({
           model: MODEL,
-          messages: [{ role: 'user', content: prompt }],
+          messages: [{ role: "user", content: prompt }],
           temperature: 0.7,
-          max_tokens: 100
-        })
+          max_tokens: 100,
+        }),
       });
 
       if (!response.ok) {
@@ -355,27 +395,36 @@ Your reply:`;
         continue;
       }
 
-      const data = await response.json() as {
-        choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
+      const data = (await response.json()) as {
+        choices?: Array<{
+          message?: { content?: string; reasoning_content?: string };
+        }>;
       };
 
       // GLM-4.7 may put response in content OR reasoning_content - check both
-      let text = data.choices?.[0]?.message?.content?.trim() || '';
-      const reasoning = data.choices?.[0]?.message?.reasoning_content || '';
+      let text = data.choices?.[0]?.message?.content?.trim() || "";
+      const reasoning = data.choices?.[0]?.message?.reasoning_content || "";
 
       // If content is empty but reasoning exists, try to extract actual reply
       if (!text && reasoning) {
-        logger.info('GLM reply in reasoning_content, extracting...');
+        logger.info("GLM reply in reasoning_content, extracting...");
         // Try to find quoted text that looks like a reply
         const quotedMatch = reasoning.match(/"([^"]{5,60})"/g);
         if (quotedMatch && quotedMatch.length > 0) {
           // Get the last quoted text (likely the actual reply)
           const candidates = quotedMatch
-            .map(q => q.slice(1, -1)) // Remove quotes
-            .filter(q => q.length <= 60 && q.length >= 5)
-            .filter(q => !q.includes('**') && !q.includes('*')) // Not markdown
-            .filter(q => !q.toLowerCase().includes('analyze') && !q.toLowerCase().includes('goal'))
-            .filter(q => q === q.toLowerCase() || q.includes('💀') || q.includes('🤔')); // lowercase or has emoji
+            .map((q) => q.slice(1, -1)) // Remove quotes
+            .filter((q) => q.length <= 60 && q.length >= 5)
+            .filter((q) => !q.includes("**") && !q.includes("*")) // Not markdown
+            .filter(
+              (q) =>
+                !q.toLowerCase().includes("analyze") &&
+                !q.toLowerCase().includes("goal"),
+            )
+            .filter(
+              (q) =>
+                q === q.toLowerCase() || q.includes("💀") || q.includes("🤔"),
+            ); // lowercase or has emoji
 
           if (candidates.length > 0) {
             text = candidates[candidates.length - 1];
@@ -388,15 +437,20 @@ Your reply:`;
         }
       }
 
-      text = text.replace(/^["']|["']$/g, '');
-      text = text.replace(/^(reply:|response:|here|your reply:)/i, '').trim();
+      text = text.replace(/^["']|["']$/g, "");
+      text = text.replace(/^(reply:|response:|here|your reply:)/i, "").trim();
       // Remove markdown code blocks if present
-      text = text.replace(/```[\s\S]*?```/g, '').trim();
+      text = text.replace(/```[\s\S]*?```/g, "").trim();
       // Remove any remaining markdown formatting
-      text = text.replace(/\*\*[^*]+\*\*/g, '').replace(/\*[^*]+\*/g, '').trim();
+      text = text
+        .replace(/\*\*[^*]+\*\*/g, "")
+        .replace(/\*[^*]+\*/g, "")
+        .trim();
 
       if (text) {
-        logger.info(`Fast generated reply for @${safeUsername}: "${text}" [attempt ${attempt}]`);
+        logger.info(
+          `Fast generated reply for @${safeUsername}: "${text}" [attempt ${attempt}]`,
+        );
         return text.substring(0, 100);
       }
 
@@ -408,5 +462,5 @@ Your reply:`;
   }
 
   logger.warn(`All GLM reply attempts failed for @${safeUsername}`);
-  return '';
+  return "";
 }

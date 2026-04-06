@@ -1,12 +1,13 @@
 /**
- * Auth Middleware
+ * Auth Middleware — Standalone Mode
  *
- * Validates Clerk JWT and extracts user context
+ * No external auth provider. Auto-seeds a default account
+ * and injects it into every request.
  */
 
 import { Request, Response, NextFunction, RequestHandler } from 'express';
-import { clerkClient, requireAuth } from '@clerk/express';
 import { createClient } from '@supabase/supabase-js';
+import { encryptCredential } from '@threadsponder/shared';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -18,107 +19,134 @@ export interface AuthenticatedRequest extends Request {
   };
 }
 
+let _cachedAccountId: string | null = null;
+
 /**
- * Get or create account for Clerk user
+ * Get or create the standalone account.
  */
-async function getOrCreateAccount(clerkUserId: string): Promise<string | null> {
+async function getOrCreateAccount(): Promise<string | null> {
+  if (_cachedAccountId) return _cachedAccountId;
+
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+  const userId = process.env.DEFAULT_ORG_ID || 'standalone';
 
   // Check if account exists
   const { data: existing } = await supabase
     .from('accounts')
     .select('id')
-    .eq('clerk_user_id', clerkUserId)
+    .eq('clerk_user_id', userId)
     .single();
 
   if (existing) {
+    _cachedAccountId = existing.id;
     return existing.id;
   }
 
-  // Get user info from Clerk
-  try {
-    const user = await clerkClient.users.getUser(clerkUserId);
+  // Create account
+  const { data: newAccount, error } = await supabase
+    .from('accounts')
+    .insert({
+      clerk_user_id: userId,
+      name: 'Standalone User',
+      email: `${userId}@localhost`,
+      subscription_status: 'active',
+    })
+    .select('id')
+    .single();
 
-    // Create new account
-    const { data: newAccount, error } = await supabase
-      .from('accounts')
-      .insert({
-        clerk_user_id: clerkUserId,
-        name: `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'User',
-        email: user.emailAddresses[0]?.emailAddress || '',
-        subscription_status: 'trial',
-        subscription_ends_at: new Date(
-          Date.now() + 3 * 24 * 60 * 60 * 1000
-        ).toISOString(), // 3 days trial
-      })
-      .select('id')
-      .single();
-
-    if (error) {
-      console.error('[Auth] Failed to create account:', error);
-      return null;
-    }
-
-    return newAccount.id;
-  } catch (error) {
-    console.error('[Auth] Failed to get Clerk user:', error);
+  if (error) {
+    console.error('[Auth] Failed to create standalone account:', error);
     return null;
+  }
+
+  console.log(`[Auth] Created standalone account: ${newAccount.id}`);
+  _cachedAccountId = newAccount.id;
+
+  // Auto-seed Threads credentials from env if available
+  await seedThreadsCredentials(supabase, newAccount.id);
+
+  return newAccount.id;
+}
+
+/**
+ * If THREADS_ACCESS_TOKEN and THREADS_USER_ID are set in env,
+ * auto-create a threads_accounts row so workers can start immediately.
+ */
+async function seedThreadsCredentials(supabase: any, accountId: string): Promise<void> {
+  const accessToken = process.env.THREADS_ACCESS_TOKEN;
+  const threadsUserId = process.env.THREADS_USER_ID;
+
+  if (!accessToken || !threadsUserId) return;
+
+  // Check if already exists
+  const { data: existing } = await supabase
+    .from('threads_accounts')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('threads_user_id', threadsUserId)
+    .single();
+
+  if (existing) return;
+
+  try {
+    const encrypted = encryptCredential(accessToken);
+    const tokenValue = encrypted || accessToken; // fallback to plaintext if no encryption key
+
+    await supabase.from('threads_accounts').insert({
+      account_id: accountId,
+      threads_user_id: threadsUserId,
+      threads_username: process.env.THREADS_USERNAME || null,
+      access_token_encrypted: tokenValue,
+      is_active: true,
+    });
+    console.log(`[Auth] Seeded Threads credentials for user ${threadsUserId}`);
+  } catch (err) {
+    console.error('[Auth] Failed to seed Threads credentials:', err);
   }
 }
 
 /**
- * Middleware to require authentication and inject account context
+ * Standalone auth middleware — no JWT, just injects account context
  */
 export const authMiddleware: RequestHandler[] = [
-  requireAuth(),
-  async (req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, _res: Response, next: NextFunction) => {
     try {
-      const clerkUserId = (req as any).auth?.userId;
-
-      if (!clerkUserId) {
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
-
-      const accountId = await getOrCreateAccount(clerkUserId);
+      const accountId = await getOrCreateAccount();
 
       if (!accountId) {
-        return res.status(500).json({ error: 'Failed to get account' });
+        console.error('[Auth] No account available');
+        return next();
       }
 
       (req as unknown as AuthenticatedRequest).auth = {
-        userId: clerkUserId,
+        userId: process.env.DEFAULT_ORG_ID || 'standalone',
         accountId,
       };
 
       next();
     } catch (error) {
       console.error('[Auth] Middleware error:', error);
-      return res.status(500).json({ error: 'Authentication failed' });
+      next();
     }
   },
 ];
 
 /**
- * Optional auth - doesn't require auth but extracts context if present
+ * Optional auth — same behavior in standalone mode
  */
 export const optionalAuth = async (
   req: Request,
-  res: Response,
+  _res: Response,
   next: NextFunction
 ) => {
   try {
-    const clerkUserId = (req as any).auth?.userId;
-
-    if (clerkUserId) {
-      const accountId = await getOrCreateAccount(clerkUserId);
-      if (accountId) {
-        (req as unknown as AuthenticatedRequest).auth = {
-          userId: clerkUserId,
-          accountId,
-        };
-      }
+    const accountId = await getOrCreateAccount();
+    if (accountId) {
+      (req as unknown as AuthenticatedRequest).auth = {
+        userId: process.env.DEFAULT_ORG_ID || 'standalone',
+        accountId,
+      };
     }
-
     next();
   } catch {
     next();

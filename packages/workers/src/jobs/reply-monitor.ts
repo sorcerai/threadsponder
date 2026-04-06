@@ -15,6 +15,10 @@ import { getTenantService } from '../services/tenant.js';
 import { classifyReply, Classification } from '../utils/classifier.js';
 import { generateResponse, ResponseContext } from '../utils/responder.js';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import {
+  createEvaluatorsOrchestrator,
+  type EvaluatorsOrchestrator,
+} from '../evaluators/index.js';
 
 export interface MonitorJobData {
   accountId: string;
@@ -138,8 +142,9 @@ async function processReply(
     voiceExamples: any[];
     friends: any[];
     targetClassifications?: ClassificationType[];
+    orchestrator?: EvaluatorsOrchestrator;
   },
-  reply: { id: string; text: string; username: string }
+  reply: { id: string; text: string; username: string; timestamp?: string; mediaType?: string }
 ): Promise<ProcessedReply> {
   const startTime = Date.now();
 
@@ -223,6 +228,40 @@ async function processReply(
     };
   }
 
+  // Run evaluator checks (bot loop, cooldowns, blocklist)
+  if (ctx.orchestrator) {
+    try {
+      const evalResult = await ctx.orchestrator.evaluate({
+        replyId: reply.id,
+        username: reply.username,
+        threadId: ctx.parentPost.id,
+        text: reply.text,
+        timestamp: reply.timestamp ? new Date(reply.timestamp) : new Date(),
+        classification: classificationResult.classification,
+        confidence: classificationResult.confidence,
+        hasMedia: reply.mediaType !== undefined && reply.mediaType !== 'TEXT',
+        mediaType: reply.mediaType,
+      });
+      if (!evalResult.shouldReply) {
+        console.log(`[Monitor] Evaluator blocked @${reply.username}: ${evalResult.reason}`);
+        return {
+          replyId: reply.id,
+          username: reply.username,
+          text: reply.text,
+          classification: classificationResult.classification,
+          confidence: classificationResult.confidence,
+          response: null,
+          posted: false,
+          postId: null,
+          error: `Evaluator: ${evalResult.reason}`,
+        };
+      }
+    } catch (error) {
+      console.error('[Monitor] Evaluator error, proceeding anyway:', error);
+      // FAIL OPEN — evaluators are safety layers, not gates
+    }
+  }
+
   // Skip neutral only if VERY low confidence (classifier is uncertain)
   // Lowered from 0.7 to 0.3 - respond to more neutral comments
   if (
@@ -300,6 +339,23 @@ async function processReply(
         Date.now() - startTime,
         generatedResponse.source
       );
+
+      // Track reply in evaluators (fire-and-forget)
+      if (ctx.orchestrator) {
+        try {
+          await ctx.orchestrator.trackReply({
+            ourReplyId: posted.replyId,
+            ourReplyText: generatedResponse.reply,
+            hostileId: reply.id,
+            hostileText: reply.text,
+            hostileUser: reply.username,
+            threadId: ctx.parentPost.id,
+            classification: classificationResult.classification,
+          });
+        } catch (error) {
+          console.error('[Monitor] Failed to track reply:', error);
+        }
+      }
 
       return {
         replyId: reply.id,
@@ -388,6 +444,14 @@ async function processMonitorJob(
     userId: credentials.userId,
   });
 
+  // Create evaluators orchestrator
+  let orchestrator: EvaluatorsOrchestrator | undefined;
+  try {
+    orchestrator = createEvaluatorsOrchestrator(SUPABASE_URL, SUPABASE_SERVICE_KEY, accountId);
+  } catch (error) {
+    console.error('[Monitor] Failed to create evaluators orchestrator, proceeding without:', error);
+  }
+
   // Get focused posts
   const focusedPosts = await tenantService.getFocusedPosts(threadsAccountId);
   if (focusedPosts.length === 0) {
@@ -455,11 +519,14 @@ async function processMonitorJob(
             voiceExamples,
             friends: config.friends,
             targetClassifications: focusedPost.target_classifications,
+            orchestrator,
           },
           {
             id: reply.id,
             text: reply.text,
             username: reply.username,
+            timestamp: reply.timestamp,
+            mediaType: reply.mediaType,
           }
         );
 
@@ -537,11 +604,14 @@ async function processMonitorJob(
                 voiceExamples,
                 friends: config.friends,
                 targetClassifications: focusedPost.target_classifications,
+                orchestrator,
               },
               {
                 id: nestedReply.id,
                 text: nestedReply.text,
                 username: nestedReply.username,
+                timestamp: nestedReply.timestamp,
+                mediaType: nestedReply.mediaType,
               }
             );
 

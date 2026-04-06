@@ -114,8 +114,28 @@ async function publishScheduledPost(
 
   try {
     // Publish the post
-    // TODO: Handle media_urls for image/video posts
-    const result = await client.createPost(scheduledPost.content);
+    const mediaUrls: string[] = scheduledPost.media_urls || [];
+    let mediaType: 'TEXT' | 'IMAGE' | 'VIDEO' = 'TEXT';
+    let imageUrl: string | undefined;
+    let videoUrl: string | undefined;
+
+    if (mediaUrls.length > 0) {
+      const firstUrl = mediaUrls[0];
+      if (/\.(mp4|mov|avi|webm)(\?|$)/i.test(firstUrl)) {
+        mediaType = 'VIDEO';
+        videoUrl = firstUrl;
+      } else if (/\.(jpg|jpeg|png|gif|webp)(\?|$)/i.test(firstUrl)) {
+        mediaType = 'IMAGE';
+        imageUrl = firstUrl;
+      }
+    }
+
+    const result = await client.createPost({
+      text: scheduledPost.content,
+      mediaType,
+      imageUrl,
+      videoUrl,
+    });
 
     if (result.success && result.postId) {
       console.log(`[PostScheduler] Posted successfully: ${result.postId}`);

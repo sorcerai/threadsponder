@@ -11,6 +11,8 @@ out/
 .env
 .env.local
 .env.*.local
+.env.cloudrun
+.env.production
 
 # IDE
 .idea/
@@ -40,3 +42,13 @@ coverage/
 .claude-flow/
 .swarm/
 .serena/
+.claude/plans/
+
+# Agent context files (local only)
+**/CLAUDE.md
+
+# Stale dashboard build artifacts
+packages/dashboard/packages/
+
+# Supabase local temp
+supabase/.temp/
