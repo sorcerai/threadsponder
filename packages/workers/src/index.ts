@@ -1,37 +1,19 @@
 /**
  * Threadsponder Workers
  *
- * BullMQ workers for:
- * - Reply monitoring (per-tenant)
- * - Post scheduling
- * - Voice document processing
+ * Direct cron-based job execution — no queue required.
+ * Jobs run in-process on a schedule.
  */
 
 import cron from 'node-cron';
 import http from 'http';
-import {
-  replyMonitorWorker,
-  replyMonitorQueue,
-  scheduleMonitoringJobs,
-} from './jobs/reply-monitor.js';
-import {
-  metricsCollectorWorker,
-  metricsCollectorQueue,
-  scheduleMetricsJobs,
-} from './jobs/metrics-collector.js';
-import {
-  postSchedulerWorker,
-  postSchedulerQueue,
-  scheduleDuePosts,
-} from './jobs/post-scheduler.js';
-import {
-  voiceProcessorWorker,
-  voiceProcessorQueue,
-} from './jobs/voice-processor.js';
+import { scheduleMonitoringJobs } from './jobs/reply-monitor.js';
+import { scheduleDuePosts } from './jobs/post-scheduler.js';
+import { scheduleMetricsJobs } from './jobs/metrics-collector.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
-// Health check server for Cloud Run
+// Health check server
 const healthServer = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -46,60 +28,44 @@ healthServer.listen(PORT, () => {
   console.log(`[Workers] Health server listening on port ${PORT}`);
 });
 
-// Schedule reply monitoring every minute
+// Reply monitoring — every minute
 cron.schedule('* * * * *', async () => {
-  console.log('[Scheduler] Running reply monitor scheduling...');
+  console.log('[Scheduler] Running reply monitor...');
   try {
     await scheduleMonitoringJobs();
   } catch (error) {
-    console.error('[Scheduler] Failed to schedule monitoring jobs:', error);
+    console.error('[Scheduler] Reply monitor failed:', error);
   }
 });
 
-// Schedule post publishing check every minute
+// Post publishing — every minute
 cron.schedule('* * * * *', async () => {
   console.log('[Scheduler] Checking for due scheduled posts...');
   try {
     await scheduleDuePosts();
   } catch (error) {
-    console.error('[Scheduler] Failed to schedule due posts:', error);
+    console.error('[Scheduler] Post scheduler failed:', error);
   }
 });
 
-// Schedule metrics collection every 5 minutes
+// Metrics collection — every 5 minutes
 cron.schedule('*/5 * * * *', async () => {
-  console.log('[Scheduler] Running metrics collection scheduling...');
+  console.log('[Scheduler] Running metrics collection...');
   try {
     await scheduleMetricsJobs();
   } catch (error) {
-    console.error('[Scheduler] Failed to schedule metrics jobs:', error);
+    console.error('[Scheduler] Metrics collector failed:', error);
   }
 });
 
-// Workers are initialized by their module imports (reply-monitor, post-scheduler, voice-processor, metrics-collector)
-console.log('[Workers] All workers started');
-console.log('[Workers] Cron schedulers running');
+console.log('[Workers] All cron jobs scheduled');
 
 // Graceful shutdown
-async function shutdown() {
+function shutdown() {
   console.log('[Workers] Shutting down...');
-  await Promise.allSettled([
-    replyMonitorWorker.close(),
-    postSchedulerWorker.close(),
-    voiceProcessorWorker.close(),
-    metricsCollectorWorker.close(),
-  ]);
   healthServer.close();
   process.exit(0);
 }
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
-
-// Export for testing
-export {
-  replyMonitorQueue, replyMonitorWorker,
-  metricsCollectorQueue, metricsCollectorWorker,
-  postSchedulerQueue, postSchedulerWorker,
-  voiceProcessorQueue, voiceProcessorWorker,
-};

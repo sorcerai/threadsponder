@@ -269,21 +269,12 @@ importers:
       '@google/generative-ai':
         specifier: ^0.21.0
         version: 0.21.0
-      '@supabase/supabase-js':
-        specifier: ^2.46.0
-        version: 2.89.0
       '@threadsponder/shared':
         specifier: workspace:*
         version: link:../shared
-      bullmq:
-        specifier: ^5.30.0
-        version: 5.66.4
       chonkie:
         specifier: 0.2.6
         version: 0.2.6(ws@8.18.3)(zod@3.25.76)
-      ioredis:
-        specifier: ^5.4.0
-        version: 5.8.2
       mammoth:
         specifier: ^1.11.0
         version: 1.11.0
