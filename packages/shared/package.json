@@ -12,9 +12,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.47.0",
-    "@upstash/ratelimit": "^1.0.0",
-    "@upstash/redis": "^1.28.0",
     "axios": "^1.7.9",
     "better-sqlite3": "^12.8.0",
     "cors": "^2.8.5",
