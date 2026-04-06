@@ -1,7 +1,7 @@
 /**
  * Tenant Service
  *
- * Loads tenant configuration from Supabase:
+ * Loads tenant configuration from SQLite:
  * - Account details
  * - Threads credentials (decrypted)
  * - Voice settings and examples
@@ -9,8 +9,7 @@
  * - Focused posts
  */
 
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import crypto from 'crypto';
+import { getDb, decryptCredential } from '@threadsponder/shared';
 import type {
   Account,
   ThreadsAccount,
@@ -33,265 +32,113 @@ export interface ThreadsCredentials {
   username: string | null;
 }
 
-// Encryption key from environment (32 bytes for AES-256)
-const ENCRYPTION_KEY = process.env.TOKEN_ENCRYPTION_KEY || process.env.CREDENTIAL_ENCRYPTION_KEY || '';
-
-/**
- * Decrypt an encrypted token
- */
-function decrypt(encrypted: string): string {
-  if (!ENCRYPTION_KEY) {
-    throw new Error('TOKEN_ENCRYPTION_KEY not configured');
-  }
-
-  const [ivHex, encryptedHex] = encrypted.split(':');
-  const iv = Buffer.from(ivHex, 'hex');
-  const encryptedBuffer = Buffer.from(encryptedHex, 'hex');
-  const key = Buffer.from(ENCRYPTION_KEY, 'base64');
-
-  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-  const decrypted = Buffer.concat([
-    decipher.update(encryptedBuffer),
-    decipher.final(),
-  ]);
-
-  return decrypted.toString('utf8');
-}
-
-/**
- * Encrypt a token for storage
- */
-export function encrypt(plaintext: string): string {
-  if (!ENCRYPTION_KEY) {
-    throw new Error('TOKEN_ENCRYPTION_KEY not configured');
-  }
-
-  const key = Buffer.from(ENCRYPTION_KEY, 'base64');
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-  const encrypted = Buffer.concat([
-    cipher.update(plaintext, 'utf8'),
-    cipher.final(),
-  ]);
-
-  return `${iv.toString('hex')}:${encrypted.toString('hex')}`;
-}
-
 export class TenantService {
-  private supabase: SupabaseClient;
+  getTenantConfig(accountId: string): TenantConfig | null {
+    const db = getDb();
 
-  constructor(supabaseUrl: string, supabaseKey: string) {
-    this.supabase = createClient(supabaseUrl, supabaseKey);
-  }
+    const account = db
+      .prepare('SELECT * FROM accounts WHERE id = ?')
+      .get(accountId) as Account | undefined;
 
-  /**
-   * Get tenant config by account ID
-   */
-  async getTenantConfig(accountId: string): Promise<TenantConfig | null> {
-    // Fetch account
-    const { data: account, error: accountError } = await this.supabase
-      .from('accounts')
-      .select('*')
-      .eq('id', accountId)
-      .single();
-
-    if (accountError || !account) {
-      console.error('Failed to load account:', accountError);
+    if (!account) {
+      console.error(`[Tenant] Account not found: ${accountId}`);
       return null;
     }
 
-    // Fetch threads accounts
-    const { data: threadsAccounts } = await this.supabase
-      .from('threads_accounts')
-      .select('*')
-      .eq('account_id', accountId)
-      .eq('is_active', true);
+    const threadsAccounts = db
+      .prepare('SELECT * FROM threads_accounts WHERE account_id = ? AND is_active = 1')
+      .all(accountId) as ThreadsAccount[];
 
-    // Fetch voice settings
-    const { data: voiceSettings } = await this.supabase
-      .from('voice_settings')
-      .select('*')
-      .eq('account_id', accountId)
-      .single();
+    const voiceSettings = (db
+      .prepare('SELECT * FROM voice_settings WHERE account_id = ?')
+      .get(accountId) ?? null) as VoiceSettings | null;
 
-    // Fetch friends
-    const { data: friends } = await this.supabase
-      .from('friends')
-      .select('*')
-      .eq('account_id', accountId);
+    const friends = db
+      .prepare('SELECT * FROM friends WHERE account_id = ?')
+      .all(accountId) as Friend[];
+
+    return { account, threadsAccounts, voiceSettings, friends };
+  }
+
+  getThreadsCredentials(threadsAccountId: string): ThreadsCredentials | null {
+    const db = getDb();
+
+    const row = db
+      .prepare(
+        'SELECT threads_user_id, threads_username, access_token_encrypted FROM threads_accounts WHERE id = ? AND is_active = 1'
+      )
+      .get(threadsAccountId) as
+      | { threads_user_id: string; threads_username: string | null; access_token_encrypted: string }
+      | undefined;
+
+    if (!row) {
+      console.error(`[Tenant] Threads account not found: ${threadsAccountId}`);
+      return null;
+    }
+
+    const accessToken = decryptCredential(row.access_token_encrypted);
+    if (!accessToken) {
+      console.error('[Tenant] Failed to decrypt access token');
+      return null;
+    }
 
     return {
-      account: account as Account,
-      threadsAccounts: (threadsAccounts || []) as ThreadsAccount[],
-      voiceSettings: voiceSettings as VoiceSettings | null,
-      friends: (friends || []) as Friend[],
+      accessToken,
+      userId: row.threads_user_id,
+      username: row.threads_username,
     };
   }
 
-  /**
-   * Get decrypted Threads credentials for a specific account
-   */
-  async getThreadsCredentials(
-    threadsAccountId: string
-  ): Promise<ThreadsCredentials | null> {
-    const { data, error } = await this.supabase
-      .from('threads_accounts')
-      .select('threads_user_id, threads_username, access_token_encrypted')
-      .eq('id', threadsAccountId)
-      .eq('is_active', true)
-      .single();
-
-    if (error || !data) {
-      console.error('Failed to load threads credentials:', error);
-      return null;
-    }
-
-    try {
-      const accessToken = decrypt(data.access_token_encrypted);
-      return {
-        accessToken,
-        userId: data.threads_user_id,
-        username: data.threads_username,
-      };
-    } catch (err) {
-      console.error('Failed to decrypt access token:', err);
-      return null;
-    }
-  }
-
-  /**
-   * Get voice examples for a tenant, optionally filtered by tone
-   */
-  async getVoiceExamples(
+  getVoiceExamples(
     accountId: string,
     tone?: 'friendly' | 'neutral' | 'hostile',
     limit: number = 20
-  ): Promise<VoiceExample[]> {
-    let query = this.supabase
-      .from('voice_examples')
-      .select('*')
-      .eq('account_id', accountId)
-      .eq('is_active', true)
-      .limit(limit);
+  ): VoiceExample[] {
+    const db = getDb();
 
     if (tone) {
-      query = query.eq('tone', tone);
+      return db
+        .prepare('SELECT * FROM voice_examples WHERE account_id = ? AND tone = ? LIMIT ?')
+        .all(accountId, tone, limit) as VoiceExample[];
     }
 
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('Failed to load voice examples:', error);
-      return [];
-    }
-
-    return (data || []) as VoiceExample[];
+    return db
+      .prepare('SELECT * FROM voice_examples WHERE account_id = ? LIMIT ?')
+      .all(accountId, limit) as VoiceExample[];
   }
 
-  /**
-   * Search voice examples by embedding similarity (requires pgvector function)
-   */
-  async searchVoiceExamples(
-    accountId: string,
-    queryEmbedding: number[],
-    tone: 'friendly' | 'neutral' | 'hostile',
-    limit: number = 5
-  ): Promise<VoiceExample[]> {
-    const { data, error } = await this.supabase.rpc('search_voice_examples', {
-      p_account_id: accountId,
-      p_embedding: queryEmbedding,
-      p_tone: tone,
-      p_limit: limit,
-    });
+  getFocusedPosts(threadsAccountId: string): FocusedPost[] {
+    const db = getDb();
 
-    if (error) {
-      console.error('Voice search failed:', error);
-      return [];
-    }
-
-    return (data || []) as VoiceExample[];
+    return db
+      .prepare('SELECT * FROM focused_posts WHERE threads_account_id = ? AND is_active = 1')
+      .all(threadsAccountId) as FocusedPost[];
   }
 
-  /**
-   * Get focused posts to monitor for a Threads account
-   */
-  async getFocusedPosts(threadsAccountId: string): Promise<FocusedPost[]> {
-    const { data, error } = await this.supabase
-      .from('focused_posts')
-      .select('*')
-      .eq('threads_account_id', threadsAccountId)
-      .eq('is_active', true);
+  getActiveTenants(): Array<{ accountId: string; threadsAccountId: string }> {
+    const db = getDb();
 
-    if (error) {
-      console.error('Failed to load focused posts:', error);
-      return [];
-    }
+    const rows = db
+      .prepare('SELECT id, account_id FROM threads_accounts WHERE is_active = 1')
+      .all() as Array<{ id: string; account_id: string }>;
 
-    return (data || []) as FocusedPost[];
-  }
-
-  /**
-   * Check if a username is in the friends list
-   */
-  async isFriend(accountId: string, username: string): Promise<Friend | null> {
-    const { data, error } = await this.supabase
-      .from('friends')
-      .select('*')
-      .eq('account_id', accountId)
-      .ilike('username', username)
-      .single();
-
-    if (error || !data) {
-      return null;
-    }
-
-    return data as Friend;
-  }
-
-  /**
-   * Get all active tenants for scheduling jobs
-   */
-  async getActiveTenants(): Promise<
-    Array<{ accountId: string; threadsAccountId: string }>
-  > {
-    const { data, error } = await this.supabase
-      .from('threads_accounts')
-      .select('id, account_id')
-      .eq('is_active', true);
-
-    if (error) {
-      console.error('Failed to load active tenants:', error);
-      return [];
-    }
-
-    return (data || []).map((row) => ({
+    return rows.map((row) => ({
       accountId: row.account_id,
       threadsAccountId: row.id,
     }));
   }
 
-  /**
-   * Check if subscription is active.
-   * Standalone mode: always active.
-   */
-  async isSubscriptionActive(_accountId: string): Promise<boolean> {
+  /** Standalone mode: subscription is always active. */
+  isSubscriptionActive(_accountId: string): boolean {
     return true;
   }
 }
 
-// Singleton instance
 let tenantService: TenantService | null = null;
 
 export function getTenantService(): TenantService {
   if (!tenantService) {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
-
-    if (!supabaseUrl || !supabaseKey) {
-      throw new Error('SUPABASE_URL and SUPABASE_SERVICE_KEY required');
-    }
-
-    tenantService = new TenantService(supabaseUrl, supabaseKey);
+    tenantService = new TenantService();
   }
   return tenantService;
 }
