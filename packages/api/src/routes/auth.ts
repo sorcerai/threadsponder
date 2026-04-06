@@ -1,21 +1,12 @@
 import { Router, Request, Response } from "express";
-import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
-import { z } from "zod";
-import { oauthState, encryptCredential } from "@threadsponder/shared";
+import { oauthState, encryptCredential, getDb } from "@threadsponder/shared";
 
 const router: Router = Router();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || "";
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const THREADS_APP_ID = process.env.THREADS_APP_ID || "";
 const THREADS_APP_SECRET = process.env.THREADS_APP_SECRET || "";
 const THREADS_REDIRECT_URI = process.env.THREADS_REDIRECT_URI || "";
-const NODE_ENV = process.env.NODE_ENV || "development";
-
-function getSupabase() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-}
 
 function generateStateToken(): string {
   return crypto.randomBytes(32).toString("hex");
@@ -28,22 +19,26 @@ router.get("/threads", async (req: Request, res: Response) => {
       return res.status(500).json({ error: "OAuth not configured" });
     }
 
-    // Get orgId from authenticated request (Clerk middleware should provide this)
-    // For now, we require it as a query parameter until Clerk integration is complete
-    const orgId = req.query.org_id as string;
+    // Use org_id if provided, otherwise fall back to the standalone account
+    let orgId = req.query.org_id as string;
     if (!orgId) {
-      return res.status(400).json({
-        error: "org_id is required",
-        message: "Organization ID must be provided to connect Threads account",
-      });
+      const db = getDb();
+      const userId = process.env.DEFAULT_ORG_ID || "standalone";
+      const account = db
+        .prepare("SELECT id FROM accounts WHERE user_id = ?")
+        .get(userId) as { id: string } | undefined;
+      if (!account) {
+        return res.status(500).json({
+          error: "No account found. Start the API first to auto-seed.",
+        });
+      }
+      orgId = account.id;
     }
 
-    // Generate CSRF state token and store with orgId in Redis (5min TTL)
     const stateToken = generateStateToken();
-    await oauthState.set(stateToken, orgId);
+    oauthState.set(stateToken, orgId);
 
     const scopes = ["threads_basic", "threads_content_publish"].join(",");
-
     const url = `https://threads.net/oauth/authorize?client_id=${THREADS_APP_ID}&redirect_uri=${encodeURIComponent(THREADS_REDIRECT_URI)}&scope=${scopes}&response_type=code&state=${stateToken}`;
 
     res.redirect(url);
@@ -75,7 +70,7 @@ router.get("/threads/callback", async (req: Request, res: Response) => {
       return res.redirect("/?error=invalid_state");
     }
 
-    const orgId = await oauthState.validate(state);
+    const orgId = oauthState.validate(state);
     if (!orgId) {
       console.error(
         "[OAuth] Invalid or expired state token - possible CSRF attack",
@@ -99,7 +94,6 @@ router.get("/threads/callback", async (req: Request, res: Response) => {
       },
     );
 
-    // Explicitly type the response to avoid unknown/any errors
     const tokenData = (await tokenRes.json()) as {
       access_token?: string;
       user_id?: number | string;
@@ -126,24 +120,18 @@ router.get("/threads/callback", async (req: Request, res: Response) => {
       return res.redirect("/?error=encryption_failed");
     }
 
-    // Save to Supabase with proper tenant isolation
-    const { error: dbError } = await getSupabase()
-      .from("threads_accounts")
-      .upsert(
-        {
-          organization_id: orgId, // Tenant isolation via orgId from validated state
-          threads_user_id: String(user_id),
-          threads_username: null, // Fetched separately via profile API
-          encrypted_access_token: encryptedToken,
-          is_active: true,
-          updated_at: new Date().toISOString(),
-        },
-        {
-          onConflict: "organization_id,threads_user_id",
-        },
-      );
-
-    if (dbError) {
+    // Save to SQLite with proper tenant isolation
+    const db = getDb();
+    try {
+      db.prepare(`
+        INSERT INTO threads_accounts (account_id, threads_user_id, threads_username, access_token_encrypted, is_active)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT(account_id, threads_user_id) DO UPDATE SET
+          access_token_encrypted = excluded.access_token_encrypted,
+          is_active = 1,
+          updated_at = datetime('now')
+      `).run(orgId, String(user_id), null, encryptedToken);
+    } catch (dbError) {
       console.error("[OAuth] DB Error:", dbError);
       return res.redirect("/?error=db_save_failed");
     }

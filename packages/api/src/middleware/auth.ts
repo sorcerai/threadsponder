@@ -6,11 +6,7 @@
  */
 
 import { Request, Response, NextFunction, RequestHandler } from 'express';
-import { createClient } from '@supabase/supabase-js';
-import { encryptCredential } from '@threadsponder/shared';
-
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+import { getDb, encryptCredential } from '@threadsponder/shared';
 
 export interface AuthenticatedRequest extends Request {
   auth: {
@@ -24,67 +20,51 @@ let _cachedAccountId: string | null = null;
 /**
  * Get or create the standalone account.
  */
-async function getOrCreateAccount(): Promise<string | null> {
+function getOrCreateAccount(): string | null {
   if (_cachedAccountId) return _cachedAccountId;
 
-  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+  const db = getDb();
   const userId = process.env.DEFAULT_ORG_ID || 'standalone';
 
-  // Check if account exists
-  const { data: existing } = await supabase
-    .from('accounts')
-    .select('id')
-    .eq('clerk_user_id', userId)
-    .single();
-
+  const existing = db.prepare('SELECT id FROM accounts WHERE user_id = ?').get(userId) as { id: string } | undefined;
   if (existing) {
     _cachedAccountId = existing.id;
     return existing.id;
   }
 
-  // Create account
-  const { data: newAccount, error } = await supabase
-    .from('accounts')
-    .insert({
-      clerk_user_id: userId,
-      name: 'Standalone User',
-      email: `${userId}@localhost`,
-      subscription_status: 'active',
-    })
-    .select('id')
-    .single();
+  try {
+    db.prepare(
+      'INSERT INTO accounts (user_id, name, email, subscription_status) VALUES (?, ?, ?, ?)'
+    ).run(userId, 'Standalone User', `${userId}@localhost`, 'active');
 
-  if (error) {
-    console.error('[Auth] Failed to create standalone account:', error);
+    const newAccount = db.prepare('SELECT id FROM accounts WHERE user_id = ?').get(userId) as { id: string };
+    console.log(`[Auth] Created standalone account: ${newAccount.id}`);
+    _cachedAccountId = newAccount.id;
+
+    // Auto-seed Threads credentials from env if available
+    seedThreadsCredentials(newAccount.id);
+
+    return newAccount.id;
+  } catch (err) {
+    console.error('[Auth] Failed to create standalone account:', err);
     return null;
   }
-
-  console.log(`[Auth] Created standalone account: ${newAccount.id}`);
-  _cachedAccountId = newAccount.id;
-
-  // Auto-seed Threads credentials from env if available
-  await seedThreadsCredentials(supabase, newAccount.id);
-
-  return newAccount.id;
 }
 
 /**
  * If THREADS_ACCESS_TOKEN and THREADS_USER_ID are set in env,
  * auto-create a threads_accounts row so workers can start immediately.
  */
-async function seedThreadsCredentials(supabase: any, accountId: string): Promise<void> {
+function seedThreadsCredentials(accountId: string): void {
   const accessToken = process.env.THREADS_ACCESS_TOKEN;
   const threadsUserId = process.env.THREADS_USER_ID;
 
   if (!accessToken || !threadsUserId) return;
 
-  // Check if already exists
-  const { data: existing } = await supabase
-    .from('threads_accounts')
-    .select('id')
-    .eq('account_id', accountId)
-    .eq('threads_user_id', threadsUserId)
-    .single();
+  const db = getDb();
+  const existing = db.prepare(
+    'SELECT id FROM threads_accounts WHERE account_id = ? AND threads_user_id = ?'
+  ).get(accountId, threadsUserId);
 
   if (existing) return;
 
@@ -92,13 +72,10 @@ async function seedThreadsCredentials(supabase: any, accountId: string): Promise
     const encrypted = encryptCredential(accessToken);
     const tokenValue = encrypted || accessToken; // fallback to plaintext if no encryption key
 
-    await supabase.from('threads_accounts').insert({
-      account_id: accountId,
-      threads_user_id: threadsUserId,
-      threads_username: process.env.THREADS_USERNAME || null,
-      access_token_encrypted: tokenValue,
-      is_active: true,
-    });
+    db.prepare(
+      'INSERT INTO threads_accounts (account_id, threads_user_id, threads_username, access_token_encrypted, is_active) VALUES (?, ?, ?, ?, 1)'
+    ).run(accountId, threadsUserId, process.env.THREADS_USERNAME || null, tokenValue);
+
     console.log(`[Auth] Seeded Threads credentials for user ${threadsUserId}`);
   } catch (err) {
     console.error('[Auth] Failed to seed Threads credentials:', err);
@@ -109,9 +86,9 @@ async function seedThreadsCredentials(supabase: any, accountId: string): Promise
  * Standalone auth middleware — no JWT, just injects account context
  */
 export const authMiddleware: RequestHandler[] = [
-  async (req: Request, _res: Response, next: NextFunction) => {
+  (req: Request, _res: Response, next: NextFunction) => {
     try {
-      const accountId = await getOrCreateAccount();
+      const accountId = getOrCreateAccount();
 
       if (!accountId) {
         console.error('[Auth] No account available');
@@ -134,13 +111,9 @@ export const authMiddleware: RequestHandler[] = [
 /**
  * Optional auth — same behavior in standalone mode
  */
-export const optionalAuth = async (
-  req: Request,
-  _res: Response,
-  next: NextFunction
-) => {
+export const optionalAuth = (req: Request, _res: Response, next: NextFunction) => {
   try {
-    const accountId = await getOrCreateAccount();
+    const accountId = getOrCreateAccount();
     if (accountId) {
       (req as unknown as AuthenticatedRequest).auth = {
         userId: process.env.DEFAULT_ORG_ID || 'standalone',
