@@ -22,7 +22,8 @@ const KEY_LENGTH = 32; // 256 bits
  */
 function deriveKey(password: string, salt: Buffer): Buffer {
   // scrypt parameters: N=2^15, r=8, p=1 (recommended for 2024+)
-  return scryptSync(password, salt, KEY_LENGTH, { N: 32768, r: 8, p: 1 });
+  // maxmem must be explicitly set: 128 * N * r = 128 * 32768 * 8 = 32MB + headroom
+  return scryptSync(password, salt, KEY_LENGTH, { N: 32768, r: 8, p: 1, maxmem: 67108864 });
 }
 
 /**
