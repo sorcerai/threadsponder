@@ -1,59 +1,29 @@
 /**
  * Posts Routes
  *
- * Focused posts and scheduled posts
+ * Focused posts and scheduled posts (SQLite backend)
  */
 
 import express, { Response, Router } from 'express';
-import { createClient } from '@supabase/supabase-js';
-import crypto from 'crypto';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/auth.js';
-import { ThreadsClient } from '@threadsponder/shared';
+import { ThreadsClient, getDb, decryptCredential } from '@threadsponder/shared';
 
 const router: Router = express.Router();
-
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
-
-/**
- * Decrypt access token stored in database
- */
-function decryptToken(encrypted: string): string {
-  const [ivHex, encryptedHex] = encrypted.split(':');
-  const iv = Buffer.from(ivHex, 'hex');
-  const decipher = crypto.createDecipheriv(
-    'aes-256-cbc',
-    Buffer.from(ENCRYPTION_KEY, 'hex'),
-    iv
-  );
-  let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
-}
-
-function getSupabase() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-}
 
 const focusedPostSchema = z.object({
   threadsAccountId: z.string().uuid(),
   postId: z.string().min(1),
   postText: z.string().optional(),
-  // Dual URL format storage
-  permalinkCom: z.string().optional(),  // threads.com/@user/post/shortcode
-  permalinkNet: z.string().optional(),  // threads.net/post/numericId
-  shortcode: z.string().optional(),      // Just the shortcode part
-  // Classification targeting - which reply types to respond to
+  // These fields are accepted but NOT stored (schema doesn't have them)
+  permalinkCom: z.string().optional(),
+  permalinkNet: z.string().optional(),
+  shortcode: z.string().optional(),
   targetClassifications: z.array(z.enum(['hostile', 'friendly', 'neutral'])).optional(),
 });
 
 /**
  * Extract post info from Threads URL
- * Supports both formats:
- * - https://www.threads.com/@username/post/SHORTCODE (user-facing)
- * - https://www.threads.net/post/NUMERICID (API/internal)
  */
 function extractPostInfo(input: string): {
   identifier: string;
@@ -65,55 +35,49 @@ function extractPostInfo(input: string): {
   if (!input) return null;
   const trimmed = input.trim();
 
-  // If it's already just numbers (a numeric post ID)
   if (/^\d+$/.test(trimmed)) {
     return {
       identifier: trimmed,
       isNumericId: true,
-      permalinkNet: `https://www.threads.net/post/${trimmed}`
+      permalinkNet: `https://www.threads.net/post/${trimmed}`,
     };
   }
 
-  // threads.com/@username/post/SHORTCODE format
   const comMatch = trimmed.match(/threads\.com\/@([^\/]+)\/post\/([A-Za-z0-9_-]+)/);
   if (comMatch) {
     return {
       identifier: comMatch[2],
       isNumericId: false,
       username: comMatch[1],
-      permalinkCom: `https://www.threads.com/@${comMatch[1]}/post/${comMatch[2]}`
+      permalinkCom: `https://www.threads.com/@${comMatch[1]}/post/${comMatch[2]}`,
     };
   }
 
-  // threads.com/t/SHORTCODE format (short URL - store original, we can't get username from this)
   const shortUrlMatch = trimmed.match(/threads\.com\/t\/([A-Za-z0-9_-]+)/);
   if (shortUrlMatch) {
     return {
       identifier: shortUrlMatch[1],
       isNumericId: false,
-      // Store the original /t/ URL as permalinkCom since it works
-      permalinkCom: `https://www.threads.com/t/${shortUrlMatch[1]}`
+      permalinkCom: `https://www.threads.com/t/${shortUrlMatch[1]}`,
     };
   }
 
-  // threads.net/post/NUMERICID format
   const netMatch = trimmed.match(/threads\.net\/post\/(\d+)/);
   if (netMatch) {
     return {
       identifier: netMatch[1],
       isNumericId: true,
-      permalinkNet: `https://www.threads.net/post/${netMatch[1]}`
+      permalinkNet: `https://www.threads.net/post/${netMatch[1]}`,
     };
   }
 
-  // Generic /post/ pattern fallback
   const postMatch = trimmed.match(/\/post\/([A-Za-z0-9_-]+)/);
   if (postMatch) {
     const isNumeric = /^\d+$/.test(postMatch[1]);
     return {
       identifier: postMatch[1],
       isNumericId: isNumeric,
-      permalinkNet: isNumeric ? `https://www.threads.net/post/${postMatch[1]}` : undefined
+      permalinkNet: isNumeric ? `https://www.threads.net/post/${postMatch[1]}` : undefined,
     };
   }
 
@@ -135,23 +99,16 @@ const scheduledPostSchema = z.object({
  * GET /api/posts/focused
  * List focused posts to monitor
  */
-router.get('/focused', async (req, res: Response) => {
+router.get('/focused', (req, res: Response) => {
   try {
     const { accountId } = (req as unknown as AuthenticatedRequest).auth;
+    const db = getDb();
 
-    const { data, error } = await getSupabase()
-      .from('focused_posts')
-      .select(`
-        id, post_id, post_text, is_active, created_at,
-        permalink_com, permalink_net, shortcode, target_classifications,
-        threads_accounts (id, threads_username)
-      `)
-      .eq('account_id', accountId)
-      .order('created_at', { ascending: false });
+    const posts = db.prepare(
+      'SELECT id, threads_post_id, post_text, is_active, created_at, threads_account_id FROM focused_posts WHERE account_id = ? ORDER BY created_at DESC'
+    ).all(accountId);
 
-    if (error) throw error;
-
-    res.json({ posts: data || [] });
+    res.json({ posts });
   } catch (error) {
     console.error('[Posts] Failed to list focused posts:', error);
     res.status(500).json({ error: 'Failed to list focused posts' });
@@ -171,73 +128,58 @@ router.post('/focused', async (req, res: Response) => {
       return res.status(400).json({ error: 'Invalid request body' });
     }
 
-    const { threadsAccountId, postId, postText, permalinkCom, permalinkNet, shortcode, targetClassifications } = parsed.data;
+    const { threadsAccountId, postId, postText } = parsed.data;
+    const db = getDb();
 
-    // Verify threads account belongs to user and get credentials for API call
-    const { data: threadsAccount } = await getSupabase()
-      .from('threads_accounts')
-      .select('id, threads_user_id, access_token_encrypted')
-      .eq('id', threadsAccountId)
-      .eq('account_id', accountId)
-      .single();
+    // Verify threads account belongs to user
+    const threadsAccount = db.prepare(
+      'SELECT id, threads_user_id, access_token_encrypted FROM threads_accounts WHERE id = ? AND account_id = ?'
+    ).get(threadsAccountId, accountId) as {
+      id: string;
+      threads_user_id: string;
+      access_token_encrypted: string;
+    } | undefined;
 
     if (!threadsAccount) {
       return res.status(403).json({ error: 'Threads account not found' });
     }
 
-    // Extract URL info if not provided directly
+    // Determine the numeric/identifier post ID to store
     const urlInfo = extractPostInfo(postId);
-    let finalPermalinkCom = permalinkCom || urlInfo?.permalinkCom || null;
-    let finalPermalinkNet = permalinkNet || urlInfo?.permalinkNet || null;
-    let finalShortcode = shortcode || (!urlInfo?.isNumericId ? urlInfo?.identifier : null) || null;
+    const threadsPostId = urlInfo?.identifier || postId;
 
-    // If we only have a numeric ID (no permalinkCom), fetch the proper permalink from Threads API
+    // Optionally fetch post details from Threads API for postText if not provided
+    let finalPostText = postText || null;
     const numericId = urlInfo?.isNumericId ? urlInfo.identifier : null;
-    if (!finalPermalinkCom && numericId && threadsAccount.access_token_encrypted) {
+    if (!finalPostText && numericId && threadsAccount.access_token_encrypted) {
       try {
-        const accessToken = decryptToken(threadsAccount.access_token_encrypted);
-        const client = new ThreadsClient({
-          accessToken,
-          userId: threadsAccount.threads_user_id,
-        });
-
-        const postDetails = await client.getPostDetails(numericId);
-        if (postDetails.success && postDetails.post?.permalink) {
-          // Threads API returns threads.com/@username/post/shortcode format
-          finalPermalinkCom = postDetails.post.permalink;
-          // Extract shortcode from permalink
-          const shortcodeMatch = postDetails.post.permalink.match(/\/post\/([A-Za-z0-9_-]+)/);
-          if (shortcodeMatch) {
-            finalShortcode = shortcodeMatch[1];
+        const accessToken = decryptCredential(threadsAccount.access_token_encrypted);
+        if (accessToken) {
+          const client = new ThreadsClient({
+            accessToken,
+            userId: threadsAccount.threads_user_id,
+          });
+          const postDetails = await client.getPostDetails(numericId);
+          if (postDetails.success && postDetails.post?.text) {
+            finalPostText = postDetails.post.text;
           }
-          console.log(`[Posts] Fetched permalink for post ${numericId}: ${finalPermalinkCom}`);
         }
       } catch (apiError) {
-        console.warn(`[Posts] Could not fetch permalink for post ${numericId}:`, apiError);
-        // Continue without permalink - we'll still save what we have
+        console.warn(`[Posts] Could not fetch post details for ${numericId}:`, apiError);
       }
     }
 
-    const { data, error } = await getSupabase()
-      .from('focused_posts')
-      .insert({
-        account_id: accountId,
-        threads_account_id: threadsAccountId,
-        post_id: postId,
-        post_text: postText || null,
-        permalink_com: finalPermalinkCom,
-        permalink_net: finalPermalinkNet,
-        shortcode: finalShortcode,
-        is_active: true,
-        // Default to all classifications if not specified
-        target_classifications: targetClassifications || ['hostile', 'friendly', 'neutral'],
-      })
-      .select('*')
-      .single();
+    const id = crypto.randomUUID();
+    db.prepare(
+      `INSERT INTO focused_posts (id, account_id, threads_account_id, threads_post_id, post_text, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, datetime('now'))`
+    ).run(id, accountId, threadsAccountId, threadsPostId, finalPostText);
 
-    if (error) throw error;
+    const post = db.prepare(
+      'SELECT id, threads_post_id, post_text, is_active, created_at, threads_account_id FROM focused_posts WHERE id = ?'
+    ).get(id);
 
-    res.json({ success: true, post: data });
+    res.json({ success: true, post });
   } catch (error) {
     console.error('[Posts] Failed to add focused post:', error);
     res.status(500).json({ error: 'Failed to add focused post' });
@@ -248,18 +190,13 @@ router.post('/focused', async (req, res: Response) => {
  * DELETE /api/posts/focused/:id
  * Remove a focused post
  */
-router.delete('/focused/:id', async (req, res: Response) => {
+router.delete('/focused/:id', (req, res: Response) => {
   try {
     const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
+    const db = getDb();
 
-    const { error } = await getSupabase()
-      .from('focused_posts')
-      .delete()
-      .eq('id', id)
-      .eq('account_id', accountId);
-
-    if (error) throw error;
+    db.prepare('DELETE FROM focused_posts WHERE id = ? AND account_id = ?').run(id, accountId);
 
     res.json({ success: true });
   } catch (error) {
@@ -272,33 +209,30 @@ router.delete('/focused/:id', async (req, res: Response) => {
  * PATCH /api/posts/focused/:id/toggle
  * Toggle focused post monitoring
  */
-router.patch('/focused/:id/toggle', async (req, res: Response) => {
+router.patch('/focused/:id/toggle', (req, res: Response) => {
   try {
     const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
+    const db = getDb();
 
-    const { data: current } = await getSupabase()
-      .from('focused_posts')
-      .select('is_active')
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .single();
+    const current = db.prepare(
+      'SELECT is_active FROM focused_posts WHERE id = ? AND account_id = ?'
+    ).get(id, accountId) as { is_active: number } | undefined;
 
     if (!current) {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    const { data, error } = await getSupabase()
-      .from('focused_posts')
-      .update({ is_active: !current.is_active })
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .select('id, is_active')
-      .single();
+    const newActive = current.is_active ? 0 : 1;
+    db.prepare(
+      'UPDATE focused_posts SET is_active = ? WHERE id = ? AND account_id = ?'
+    ).run(newActive, id, accountId);
 
-    if (error) throw error;
+    const post = db.prepare(
+      'SELECT id, is_active FROM focused_posts WHERE id = ?'
+    ).get(id);
 
-    res.json({ success: true, post: data });
+    res.json({ success: true, post });
   } catch (error) {
     console.error('[Posts] Failed to toggle focused post:', error);
     res.status(500).json({ error: 'Failed to toggle focused post' });
@@ -307,47 +241,10 @@ router.patch('/focused/:id/toggle', async (req, res: Response) => {
 
 /**
  * PATCH /api/posts/focused/:id/classifications
- * Update target classifications for a focused post
+ * Not supported in SQLite schema
  */
-router.patch('/focused/:id/classifications', async (req, res: Response) => {
-  try {
-    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
-    const { id } = req.params;
-    const { targetClassifications } = req.body;
-
-    // Validate classifications
-    const validClassifications = ['hostile', 'friendly', 'neutral'];
-    if (!Array.isArray(targetClassifications) ||
-        !targetClassifications.every(c => validClassifications.includes(c))) {
-      return res.status(400).json({
-        error: 'Invalid classifications. Must be array of: hostile, friendly, neutral'
-      });
-    }
-
-    // Ensure at least one classification is selected
-    if (targetClassifications.length === 0) {
-      return res.status(400).json({ error: 'Must select at least one classification' });
-    }
-
-    const { data, error } = await getSupabase()
-      .from('focused_posts')
-      .update({ target_classifications: targetClassifications })
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .select('id, target_classifications')
-      .single();
-
-    if (error) throw error;
-
-    if (!data) {
-      return res.status(404).json({ error: 'Post not found' });
-    }
-
-    res.json({ success: true, post: data });
-  } catch (error) {
-    console.error('[Posts] Failed to update classifications:', error);
-    res.status(500).json({ error: 'Failed to update classifications' });
-  }
+router.patch('/focused/:id/classifications', (_req, res: Response) => {
+  res.status(501).json({ error: 'Target classifications not supported in SQLite schema' });
 });
 
 // =====================
@@ -358,29 +255,25 @@ router.patch('/focused/:id/classifications', async (req, res: Response) => {
  * GET /api/posts/scheduled
  * List scheduled posts
  */
-router.get('/scheduled', async (req, res: Response) => {
+router.get('/scheduled', (req, res: Response) => {
   try {
     const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const status = req.query.status as string | undefined;
+    const db = getDb();
 
-    let query = getSupabase()
-      .from('scheduled_posts')
-      .select(`
-        id, content, media_urls, scheduled_for, status, posted_id, error_message, created_at,
-        threads_accounts (id, threads_username)
-      `)
-      .eq('account_id', accountId)
-      .order('scheduled_for', { ascending: true });
+    let sql = 'SELECT id, content, media_urls, scheduled_for, status, posted_id, error_message, created_at, threads_account_id FROM scheduled_posts WHERE account_id = ?';
+    const params: unknown[] = [accountId];
 
     if (status) {
-      query = query.eq('status', status);
+      sql += ' AND status = ?';
+      params.push(status);
     }
 
-    const { data, error } = await query;
+    sql += ' ORDER BY scheduled_for ASC';
 
-    if (error) throw error;
+    const posts = db.prepare(sql).all(...params);
 
-    res.json({ posts: data || [] });
+    res.json({ posts });
   } catch (error) {
     console.error('[Posts] Failed to list scheduled posts:', error);
     res.status(500).json({ error: 'Failed to list scheduled posts' });
@@ -391,7 +284,7 @@ router.get('/scheduled', async (req, res: Response) => {
  * POST /api/posts/scheduled
  * Schedule a new post
  */
-router.post('/scheduled', async (req, res: Response) => {
+router.post('/scheduled', (req, res: Response) => {
   try {
     const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const parsed = scheduledPostSchema.safeParse(req.body);
@@ -401,35 +294,26 @@ router.post('/scheduled', async (req, res: Response) => {
     }
 
     const { threadsAccountId, content, mediaUrls, scheduledFor } = parsed.data;
+    const db = getDb();
 
     // Verify threads account belongs to user
-    const { data: threadsAccount } = await getSupabase()
-      .from('threads_accounts')
-      .select('id')
-      .eq('id', threadsAccountId)
-      .eq('account_id', accountId)
-      .single();
+    const threadsAccount = db.prepare(
+      'SELECT id FROM threads_accounts WHERE id = ? AND account_id = ?'
+    ).get(threadsAccountId, accountId);
 
     if (!threadsAccount) {
       return res.status(403).json({ error: 'Threads account not found' });
     }
 
-    const { data, error } = await getSupabase()
-      .from('scheduled_posts')
-      .insert({
-        account_id: accountId,
-        threads_account_id: threadsAccountId,
-        content,
-        media_urls: mediaUrls || [],
-        scheduled_for: scheduledFor,
-        status: 'pending',
-      })
-      .select('*')
-      .single();
+    const id = crypto.randomUUID();
+    db.prepare(
+      `INSERT INTO scheduled_posts (id, account_id, threads_account_id, content, media_urls, scheduled_for, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`
+    ).run(id, accountId, threadsAccountId, content, JSON.stringify(mediaUrls || []), scheduledFor);
 
-    if (error) throw error;
+    const post = db.prepare('SELECT * FROM scheduled_posts WHERE id = ?').get(id);
 
-    res.json({ success: true, post: data });
+    res.json({ success: true, post });
   } catch (error) {
     console.error('[Posts] Failed to schedule post:', error);
     res.status(500).json({ error: 'Failed to schedule post' });
@@ -440,19 +324,16 @@ router.post('/scheduled', async (req, res: Response) => {
  * PUT /api/posts/scheduled/:id
  * Update a scheduled post
  */
-router.put('/scheduled/:id', async (req, res: Response) => {
+router.put('/scheduled/:id', (req, res: Response) => {
   try {
     const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
     const { content, scheduledFor, mediaUrls } = req.body;
+    const db = getDb();
 
-    // Only allow updating pending posts
-    const { data: current } = await getSupabase()
-      .from('scheduled_posts')
-      .select('status')
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .single();
+    const current = db.prepare(
+      'SELECT status FROM scheduled_posts WHERE id = ? AND account_id = ?'
+    ).get(id, accountId) as { status: string } | undefined;
 
     if (!current) {
       return res.status(404).json({ error: 'Post not found' });
@@ -462,22 +343,19 @@ router.put('/scheduled/:id', async (req, res: Response) => {
       return res.status(400).json({ error: 'Can only edit pending posts' });
     }
 
-    const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
-    if (content) updates.content = content;
-    if (scheduledFor) updates.scheduled_for = scheduledFor;
-    if (mediaUrls) updates.media_urls = mediaUrls;
+    const setParts: string[] = ["updated_at = datetime('now')"];
+    const params: unknown[] = [];
 
-    const { data, error } = await getSupabase()
-      .from('scheduled_posts')
-      .update(updates)
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .select('*')
-      .single();
+    if (content) { setParts.push('content = ?'); params.push(content); }
+    if (scheduledFor) { setParts.push('scheduled_for = ?'); params.push(scheduledFor); }
+    if (mediaUrls) { setParts.push('media_urls = ?'); params.push(JSON.stringify(mediaUrls)); }
 
-    if (error) throw error;
+    params.push(id, accountId);
+    db.prepare(`UPDATE scheduled_posts SET ${setParts.join(', ')} WHERE id = ? AND account_id = ?`).run(...params);
 
-    res.json({ success: true, post: data });
+    const post = db.prepare('SELECT * FROM scheduled_posts WHERE id = ?').get(id);
+
+    res.json({ success: true, post });
   } catch (error) {
     console.error('[Posts] Failed to update scheduled post:', error);
     res.status(500).json({ error: 'Failed to update scheduled post' });
@@ -488,18 +366,15 @@ router.put('/scheduled/:id', async (req, res: Response) => {
  * DELETE /api/posts/scheduled/:id
  * Cancel/delete a scheduled post
  */
-router.delete('/scheduled/:id', async (req, res: Response) => {
+router.delete('/scheduled/:id', (req, res: Response) => {
   try {
     const { accountId } = (req as unknown as AuthenticatedRequest).auth;
     const { id } = req.params;
+    const db = getDb();
 
-    // Check if post is pending
-    const { data: current } = await getSupabase()
-      .from('scheduled_posts')
-      .select('status')
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .single();
+    const current = db.prepare(
+      'SELECT status FROM scheduled_posts WHERE id = ? AND account_id = ?'
+    ).get(id, accountId) as { status: string } | undefined;
 
     if (!current) {
       return res.status(404).json({ error: 'Post not found' });
@@ -509,13 +384,7 @@ router.delete('/scheduled/:id', async (req, res: Response) => {
       return res.status(400).json({ error: 'Cannot delete posted posts' });
     }
 
-    const { error } = await getSupabase()
-      .from('scheduled_posts')
-      .delete()
-      .eq('id', id)
-      .eq('account_id', accountId);
-
-    if (error) throw error;
+    db.prepare('DELETE FROM scheduled_posts WHERE id = ? AND account_id = ?').run(id, accountId);
 
     res.json({ success: true });
   } catch (error) {

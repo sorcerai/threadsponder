@@ -9,7 +9,12 @@
 
 import type { VoiceSettings, VoiceExample, Friend } from '@threadsponder/shared';
 import type { Classification } from './classifier.js';
-import type { AttackVector } from './insecurity-provider.js';
+/** Attack vector from insecurity provider (feature removed — type kept for interface compat) */
+interface AttackVector {
+  archetype: string;
+  prompt: string;
+  data: string;
+}
 
 // OpenRouter config
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';

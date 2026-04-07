@@ -1,30 +1,53 @@
 /**
  * Reports API Routes
  *
- * Endpoints for EOD reports and analytics exports:
- * - GET /api/reports/eod - Fetch EOD report for a date
- * - POST /api/reports/eod/generate - Force regenerate report
- * - GET /api/reports/eod/history - Get list of available reports
- * - GET /api/reports/eod/export - Export report as JSON/CSV
+ * EOD reports generated from SQLite data.
  */
 
 import { Router, Request, Response } from 'express';
-import { createClient } from '@supabase/supabase-js';
-import {
-  generateDailyReport,
-  storeReport,
-  getReportHistory,
-  EODReport,
-} from '../services/eod-report-service.js';
 import { AuthenticatedRequest } from '../middleware/auth.js';
+import { getDb } from '@threadsponder/shared';
 
 const router: Router = Router();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+interface ReportSummary {
+  totalReplies: number;
+  triggered: number;
+  classifications: { hostile: number; friendly: number; neutral: number; skip: number };
+  avgEffortRatio: number;
+}
 
-function getSupabase() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+interface EODReport {
+  date: string;
+  summary: ReportSummary;
+  patterns: Array<{ name: string; count: number }>;
+  bestHours: Array<{ hour: number; count: number }>;
+  weeklyTrend: Array<{ date: string; count: number }>;
+}
+
+function generateSimpleReport(accountId: string, date: Date): EODReport {
+  const db = getDb();
+  const dateStr = date.toISOString().split('T')[0];
+
+  const rows = db.prepare(
+    "SELECT classification, replied FROM reply_history WHERE account_id = ? AND date(created_at) = ?"
+  ).all(accountId, dateStr) as Array<{ classification: string; replied: number }>;
+
+  const summary: ReportSummary = {
+    totalReplies: rows.length,
+    triggered: 0,
+    classifications: { hostile: 0, friendly: 0, neutral: 0, skip: 0 },
+    avgEffortRatio: 0,
+  };
+
+  for (const r of rows) {
+    if (r.replied) summary.triggered++;
+    if (r.classification in summary.classifications) {
+      summary.classifications[r.classification as keyof typeof summary.classifications]++;
+    }
+  }
+
+  return { date: dateStr, summary, patterns: [], bestHours: [], weeklyTrend: [] };
 }
 
 function getAccountId(req: Request): string | null {
@@ -36,29 +59,23 @@ function getAccountId(req: Request): string | null {
  * GET /api/reports/eod
  * Fetch EOD report for a date (defaults to today)
  */
-router.get('/eod', async (req: Request, res: Response) => {
+router.get('/eod', (req: Request, res: Response) => {
   try {
-    const accountId = await getAccountId(req);
+    const accountId = getAccountId(req);
     if (!accountId) {
       return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
 
     const dateParam = req.query.date as string | undefined;
-    const compare = (req.query.compare as 'yesterday' | 'lastweek') || 'yesterday';
-
     const targetDate = dateParam ? new Date(dateParam) : new Date();
+
     if (isNaN(targetDate.getTime())) {
       return res.status(400).json({ success: false, error: 'Invalid date format' });
     }
 
-    const supabase = getSupabase();
-    const report = await generateDailyReport(supabase, accountId, targetDate, compare);
+    const report = generateSimpleReport(accountId, targetDate);
 
-    return res.json({
-      success: true,
-      report,
-      regenerated: false,
-    });
+    return res.json({ success: true, report, regenerated: false });
   } catch (error) {
     console.error('Error fetching EOD report:', error);
     return res.status(500).json({
@@ -72,30 +89,23 @@ router.get('/eod', async (req: Request, res: Response) => {
  * POST /api/reports/eod/generate
  * Force regenerate report for a date
  */
-router.post('/eod/generate', async (req: Request, res: Response) => {
+router.post('/eod/generate', (req: Request, res: Response) => {
   try {
-    const accountId = await getAccountId(req);
+    const accountId = getAccountId(req);
     if (!accountId) {
       return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
 
     const { date } = req.body;
     const targetDate = date ? new Date(date) : new Date();
+
     if (isNaN(targetDate.getTime())) {
       return res.status(400).json({ success: false, error: 'Invalid date format' });
     }
 
-    const supabase = getSupabase();
-    const report = await generateDailyReport(supabase, accountId, targetDate);
+    const report = generateSimpleReport(accountId, targetDate);
 
-    // Store the report
-    await storeReport(supabase, accountId, report);
-
-    return res.json({
-      success: true,
-      report,
-      regenerated: true,
-    });
+    return res.json({ success: true, report, regenerated: true });
   } catch (error) {
     console.error('Error generating EOD report:', error);
     return res.status(500).json({
@@ -109,39 +119,17 @@ router.post('/eod/generate', async (req: Request, res: Response) => {
  * GET /api/reports/eod/history
  * Get list of dates with available reports
  */
-router.get('/eod/history', async (req: Request, res: Response) => {
-  try {
-    const accountId = await getAccountId(req);
-    if (!accountId) {
-      return res.status(401).json({ success: false, error: 'Unauthorized' });
-    }
-
-    const limit = Math.min(parseInt(req.query.limit as string) || 7, 30);
-
-    const supabase = getSupabase();
-    const dates = await getReportHistory(supabase, accountId, limit);
-
-    return res.json({
-      success: true,
-      dates,
-      count: dates.length,
-    });
-  } catch (error) {
-    console.error('Error fetching report history:', error);
-    return res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
+router.get('/eod/history', (_req: Request, res: Response) => {
+  return res.json({ success: true, dates: [], count: 0 });
 });
 
 /**
  * GET /api/reports/eod/export
  * Export report as JSON or CSV
  */
-router.get('/eod/export', async (req: Request, res: Response) => {
+router.get('/eod/export', (req: Request, res: Response) => {
   try {
-    const accountId = await getAccountId(req);
+    const accountId = getAccountId(req);
     if (!accountId) {
       return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
@@ -154,13 +142,10 @@ router.get('/eod/export', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Invalid date format' });
     }
 
-    const supabase = getSupabase();
-    const report = await generateDailyReport(supabase, accountId, targetDate);
-
+    const report = generateSimpleReport(accountId, targetDate);
     const dateStr = targetDate.toISOString().split('T')[0];
 
     if (format === 'csv') {
-      // Generate CSV
       const csvLines = [
         'EOD Report,' + dateStr,
         '',

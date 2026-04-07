@@ -1,27 +1,21 @@
 /**
- * Clerk Webhook Handler
+ * Clerk Webhook Handler (SQLite backend)
  *
- * Proactively syncs Clerk user events to Supabase accounts table.
+ * Syncs Clerk user events to the local SQLite accounts table.
  * Events: user.created, user.updated, user.deleted
  *
- * This replaces lazy account creation with proactive sync,
- * ensuring users exist in Supabase immediately after Clerk signup.
+ * Note: In standalone/open-source mode this webhook is optional —
+ * auth middleware auto-creates accounts on first request.
  */
 
 import express, { Request, Response, Router } from 'express';
 import { Webhook } from 'svix';
-import { createClient } from '@supabase/supabase-js';
+import { getDb } from '@threadsponder/shared';
 import { sendWelcomeEmail } from '../../services/email-service.js';
 
 const router: Router = express.Router();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const CLERK_WEBHOOK_SECRET = process.env.CLERK_WEBHOOK_SECRET || '';
-
-function getSupabase() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-}
 
 interface ClerkUserData {
   id: string;
@@ -42,29 +36,19 @@ interface ClerkWebhookEvent {
   data: ClerkUserData;
 }
 
-/**
- * Get primary email from Clerk user data
- */
 function getPrimaryEmail(data: ClerkUserData): string {
   if (!data.email_addresses || data.email_addresses.length === 0) {
     return '';
   }
-
-  // Find primary email
   if (data.primary_email_address_id) {
     const primary = data.email_addresses.find(
       (e) => e.id === data.primary_email_address_id
     );
     if (primary) return primary.email_address;
   }
-
-  // Fall back to first email
   return data.email_addresses[0]?.email_address || '';
 }
 
-/**
- * Get display name from Clerk user data
- */
 function getDisplayName(data: ClerkUserData): string {
   const firstName = data.first_name || '';
   const lastName = data.last_name || '';
@@ -72,86 +56,45 @@ function getDisplayName(data: ClerkUserData): string {
   return fullName || 'User';
 }
 
-/**
- * Create account in Supabase when user signs up in Clerk
- */
-async function createAccount(data: ClerkUserData): Promise<void> {
-  const supabase = getSupabase();
+function createAccount(data: ClerkUserData): void {
+  const db = getDb();
 
-  // Check if account already exists (idempotency)
-  const { data: existing } = await supabase
-    .from('accounts')
-    .select('id')
-    .eq('clerk_user_id', data.id)
-    .single();
+  const existing = db.prepare(
+    'SELECT id FROM accounts WHERE user_id = ?'
+  ).get(data.id);
 
   if (existing) {
     console.log(`[Clerk Webhook] Account already exists for ${data.id}`);
     return;
   }
 
-  // Create new account with 3-day trial
   const trialEnd = new Date();
   trialEnd.setDate(trialEnd.getDate() + 3);
 
-  const { error } = await supabase.from('accounts').insert({
-    clerk_user_id: data.id,
-    name: getDisplayName(data),
-    email: getPrimaryEmail(data),
-    subscription_status: 'trial',
-    subscription_ends_at: trialEnd.toISOString(),
-  });
-
-  if (error) {
-    console.error('[Clerk Webhook] Failed to create account:', error);
-    throw error;
-  }
+  db.prepare(
+    `INSERT INTO accounts (user_id, name, email, subscription_status, subscription_ends_at)
+     VALUES (?, ?, ?, 'trial', ?)`
+  ).run(data.id, getDisplayName(data), getPrimaryEmail(data), trialEnd.toISOString());
 
   console.log(`[Clerk Webhook] Created account for ${data.id}`);
 }
 
-/**
- * Update account when user profile changes in Clerk
- */
-async function updateAccount(data: ClerkUserData): Promise<void> {
-  const supabase = getSupabase();
+function updateAccount(data: ClerkUserData): void {
+  const db = getDb();
 
-  const { error } = await supabase
-    .from('accounts')
-    .update({
-      name: getDisplayName(data),
-      email: getPrimaryEmail(data),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('clerk_user_id', data.id);
-
-  if (error) {
-    console.error('[Clerk Webhook] Failed to update account:', error);
-    throw error;
-  }
+  db.prepare(
+    'UPDATE accounts SET name = ?, email = ?, updated_at = datetime(\'now\') WHERE user_id = ?'
+  ).run(getDisplayName(data), getPrimaryEmail(data), data.id);
 
   console.log(`[Clerk Webhook] Updated account for ${data.id}`);
 }
 
-/**
- * Deactivate account when user is deleted from Clerk
- * Soft delete - marks account as deleted but preserves data
- */
-async function deactivateAccount(clerkUserId: string): Promise<void> {
-  const supabase = getSupabase();
+function deactivateAccount(clerkUserId: string): void {
+  const db = getDb();
 
-  const { error } = await supabase
-    .from('accounts')
-    .update({
-      subscription_status: 'deleted',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('clerk_user_id', clerkUserId);
-
-  if (error) {
-    console.error('[Clerk Webhook] Failed to deactivate account:', error);
-    throw error;
-  }
+  db.prepare(
+    "UPDATE accounts SET subscription_status = 'deleted', updated_at = datetime('now') WHERE user_id = ?"
+  ).run(clerkUserId);
 
   console.log(`[Clerk Webhook] Deactivated account for ${clerkUserId}`);
 }
@@ -159,28 +102,21 @@ async function deactivateAccount(clerkUserId: string): Promise<void> {
 /**
  * POST /api/webhooks/clerk
  * Handle Clerk webhook events
- *
- * Clerk uses Svix for webhook delivery and signature verification.
- * Required headers: svix-id, svix-timestamp, svix-signature
  */
-router.post('/', async (req: Request, res: Response) => {
-  // Validate webhook secret is configured
+router.post('/', (req: Request, res: Response) => {
   if (!CLERK_WEBHOOK_SECRET) {
     console.error('[Clerk Webhook] CLERK_WEBHOOK_SECRET not configured');
     return res.status(500).json({ error: 'Webhook secret not configured' });
   }
 
-  // Extract Svix headers
   const svixId = req.headers['svix-id'] as string;
   const svixTimestamp = req.headers['svix-timestamp'] as string;
   const svixSignature = req.headers['svix-signature'] as string;
 
   if (!svixId || !svixTimestamp || !svixSignature) {
-    console.error('[Clerk Webhook] Missing Svix headers');
     return res.status(400).json({ error: 'Missing webhook headers' });
   }
 
-  // Verify webhook signature
   const wh = new Webhook(CLERK_WEBHOOK_SECRET);
   let event: ClerkWebhookEvent;
 
@@ -199,9 +135,8 @@ router.post('/', async (req: Request, res: Response) => {
 
   try {
     switch (event.type) {
-      case 'user.created':
-        await createAccount(event.data);
-        // Send welcome email (non-blocking - don't fail webhook if email fails)
+      case 'user.created': {
+        createAccount(event.data);
         const email = getPrimaryEmail(event.data);
         const name = getDisplayName(event.data);
         if (email) {
@@ -210,15 +145,13 @@ router.post('/', async (req: Request, res: Response) => {
           });
         }
         break;
-
+      }
       case 'user.updated':
-        await updateAccount(event.data);
+        updateAccount(event.data);
         break;
-
       case 'user.deleted':
-        await deactivateAccount(event.data.id);
+        deactivateAccount(event.data.id);
         break;
-
       default:
         console.log(`[Clerk Webhook] Unhandled event type: ${event.type}`);
     }

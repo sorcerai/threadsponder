@@ -13,27 +13,16 @@
 import { describe, test, expect, vi } from 'vitest';
 import request from 'supertest';
 
-// Stub out DB and Redis before importing app to keep tests fast and hermetic.
-// We are testing HTTP-layer safety properties only.
-vi.mock('@supabase/supabase-js', () => ({
-  createClient: () => ({
-    from: () => ({
-      select: () => ({ eq: () => ({ single: async () => ({ data: null, error: null }) }) }),
-      insert: () => ({ select: () => ({ single: async () => ({ data: { id: 'test-account-id' }, error: null }) }) }),
-      upsert: async () => ({ error: null }),
-    }),
-  }),
-}));
-
-// Stub Redis-backed oauthState so state validation is under test control
+// Stub oauthState so state validation is under test control.
+// oauthState is now synchronous (Map-backed), not async Redis-backed.
 vi.mock('@threadsponder/shared', async (importActual: () => Promise<typeof import('@threadsponder/shared')>) => {
   const actual = await importActual();
   return {
     ...actual,
     oauthState: {
-      set: vi.fn(async () => {}),
+      set: vi.fn(() => {}),
       // Returns null = state expired/invalid — the default for any unrecognised token
-      validate: vi.fn(async (_token: string) => null),
+      validate: vi.fn((_token: string) => null),
     },
   };
 });
@@ -166,11 +155,11 @@ describe('State Token Isolation', () => {
     const validateMock = vi.mocked(oauthState.validate);
 
     validateMock
-      .mockResolvedValueOnce('org-abc')   // first call: valid
-      .mockResolvedValueOnce(null);        // second call: consumed / expired
+      .mockReturnValueOnce('org-abc')   // first call: valid
+      .mockReturnValueOnce(null);        // second call: consumed / expired
 
-    const firstCall = await oauthState.validate('some-token');
-    const secondCall = await oauthState.validate('some-token');
+    const firstCall = oauthState.validate('some-token');
+    const secondCall = oauthState.validate('some-token');
 
     expect(firstCall).toBe('org-abc');
     expect(secondCall).toBeNull();

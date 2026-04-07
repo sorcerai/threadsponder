@@ -1,23 +1,18 @@
 /**
  * Stats Routes - Gamified Achievements
  *
- * Time saved, haters handled, streaks, and achievement tracking
+ * Time saved, haters handled, streaks, and achievement tracking (SQLite backend)
  */
 
-import express, { Request, Response, Router } from 'express';
+import express, { Response, Router } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth.js';
-import { tenantKeys, tenantPattern, getRedisClient } from '@threadsponder/shared';
-
-function getOrgId(req: Request): string {
-  const auth = (req as unknown as AuthenticatedRequest).auth;
-  return auth?.accountId || process.env.DEFAULT_ORG_ID || 'default';
-}
+import { getDb } from '@threadsponder/shared';
 
 const router: Router = express.Router();
 
 // Constants for calculations
-const AVG_MINUTES_PER_REPLY = 3; // Time saved per automated reply
-const AVG_WORDS_PER_COMEBACK = 8; // Avg words in a manual comeback
+const AVG_MINUTES_PER_REPLY = 3;
+const AVG_WORDS_PER_COMEBACK = 8;
 
 interface DailyStats {
   date: string;
@@ -27,27 +22,23 @@ interface DailyStats {
 }
 
 interface AchievementStats {
-  // Today's stats
   today: {
     hatersHandled: number;
     minutesSaved: number;
     wordsSaved: number;
     hostileWordsDeflected: number;
   };
-  // All-time stats
   allTime: {
     hatersHandled: number;
     minutesSaved: number;
     wordsSaved: number;
     hostileWordsDeflected: number;
   };
-  // Streak tracking
   streak: {
     current: number;
     best: number;
     lastActiveDate: string | null;
   };
-  // Recent daily breakdown
   recentDays: DailyStats[];
 }
 
@@ -55,73 +46,62 @@ interface AchievementStats {
  * GET /api/stats/achievements
  * Get gamified achievement stats
  */
-router.get('/achievements', async (req, res: Response) => {
+router.get('/achievements', (req, res: Response) => {
   try {
-    const orgId = getOrgId(req);
-    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-    const redis = await getRedisClient();
+    const { accountId } = (req as unknown as AuthenticatedRequest).auth;
+    const today = new Date().toISOString().split('T')[0];
+    const db = getDb();
 
-    // Get all reply map entries for counting (tenant-isolated)
-    const replyMapKeys = await redis.keys(tenantPattern(orgId, 'reply', 'map', '*'));
+    // All-time replied count
+    const allTimeResult = db.prepare(
+      'SELECT COUNT(*) as count FROM reply_history WHERE account_id = ? AND replied = 1'
+    ).get(accountId) as { count: number };
 
-    // Calculate stats from reply_map data
-    let todayHatersHandled = 0;
-    let todayHostileWords = 0;
-    let allTimeHatersHandled = replyMapKeys.length;
-    let allTimeHostileWords = 0;
+    // Today's count
+    const todayResult = db.prepare(
+      "SELECT COUNT(*) as count FROM reply_history WHERE account_id = ? AND replied = 1 AND date(created_at) = ?"
+    ).get(accountId, today) as { count: number };
 
-    // Track daily stats for streak calculation
-    const dailyActivity: Map<string, { count: number; hostileWords: number }> = new Map();
+    // All-time hostile words from hostile_words column
+    const hostileWordsAllTime = db.prepare(
+      "SELECT COALESCE(SUM(CASE WHEN hostile_words IS NOT NULL AND hostile_words != '' THEN LENGTH(hostile_words) - LENGTH(REPLACE(hostile_words, ' ', '')) + 1 ELSE 0 END), 0) as total FROM reply_history WHERE account_id = ? AND replied = 1"
+    ).get(accountId) as { total: number };
 
-    for (const key of replyMapKeys) {
-      const data = await redis.hgetall(key) as Record<string, string> | null;
-      if (!data) continue; // Skip if key doesn't exist or has no data
+    // Today's hostile words
+    const hostileWordsTodayResult = db.prepare(
+      "SELECT COALESCE(SUM(CASE WHEN hostile_words IS NOT NULL AND hostile_words != '' THEN LENGTH(hostile_words) - LENGTH(REPLACE(hostile_words, ' ', '')) + 1 ELSE 0 END), 0) as total FROM reply_history WHERE account_id = ? AND replied = 1 AND date(created_at) = ?"
+    ).get(accountId, today) as { total: number };
 
-      // Get the date from timestamp
-      const timestamp: string = data.created_at || data.timestamp || '';
-      const date = timestamp
-        ? new Date(timestamp).toISOString().split('T')[0]
-        : null;
+    // Last 7 days by day
+    const recentRows = db.prepare(
+      "SELECT date(created_at) as date, COUNT(*) as count FROM reply_history WHERE account_id = ? AND replied = 1 AND created_at >= date('now', '-7 days') GROUP BY date(created_at)"
+    ).all(accountId) as Array<{ date: string; count: number }>;
 
-      // Count hostile words
-      const hostileText: string = data.hostile_text || '';
-      const wordCount = hostileText.split(/\s+/).filter((w: string) => w.length > 0).length;
-      allTimeHostileWords += wordCount;
-
-      if (date) {
-        // Track daily activity
-        const existing = dailyActivity.get(date) || { count: 0, hostileWords: 0 };
-        dailyActivity.set(date, {
-          count: existing.count + 1,
-          hostileWords: existing.hostileWords + wordCount
-        });
-
-        // Today's stats
-        if (date === today) {
-          todayHatersHandled++;
-          todayHostileWords += wordCount;
-        }
-      }
+    // Build daily activity map for streak calculation
+    const dailyActivity = new Map<string, number>();
+    for (const row of recentRows) {
+      dailyActivity.set(row.date, row.count);
     }
 
+    // Also get all dates with activity for streak (need more than 7 days)
+    const allActivityRows = db.prepare(
+      "SELECT DISTINCT date(created_at) as date FROM reply_history WHERE account_id = ? AND replied = 1 ORDER BY date DESC"
+    ).all(accountId) as Array<{ date: string }>;
+
+    const allActivityDates = new Set(allActivityRows.map(r => r.date));
+
     // Calculate streak
-    const sortedDates = Array.from(dailyActivity.keys()).sort().reverse();
-    let currentStreak = 0;
-    let checkDate = new Date(today);
-
-    // Check if active today or yesterday to start streak
-    const todayStr = today;
     const yesterdayStr = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+    let currentStreak = 0;
 
-    if (dailyActivity.has(todayStr) || dailyActivity.has(yesterdayStr)) {
-      // Start counting streak
+    if (allActivityDates.has(today) || allActivityDates.has(yesterdayStr)) {
+      let checkDate = new Date(today);
       for (let i = 0; i < 365; i++) {
         const dateStr = checkDate.toISOString().split('T')[0];
-        if (dailyActivity.has(dateStr)) {
+        if (allActivityDates.has(dateStr)) {
           currentStreak++;
           checkDate = new Date(checkDate.getTime() - 86400000);
         } else if (i > 0) {
-          // Allow gap for today if not active yet
           break;
         } else {
           checkDate = new Date(checkDate.getTime() - 86400000);
@@ -129,72 +109,61 @@ router.get('/achievements', async (req, res: Response) => {
       }
     }
 
-    // Get best streak from Redis (or calculate) - tenant-isolated
-    const bestStreakResult = await redis.get(tenantKeys.stats.streakBest(orgId));
-    const bestStreakStr: string = typeof bestStreakResult === 'string' ? bestStreakResult : '0';
-    let bestStreak = parseInt(bestStreakStr);
-    if (currentStreak > bestStreak) {
-      bestStreak = currentStreak;
-      await redis.set(tenantKeys.stats.streakBest(orgId), bestStreak.toString());
-    }
-
     // Build recent days array (last 7 days)
     const recentDays: DailyStats[] = [];
     for (let i = 0; i < 7; i++) {
       const date = new Date(Date.now() - i * 86400000).toISOString().split('T')[0];
-      const dayData = dailyActivity.get(date);
+      const dayCount = dailyActivity.get(date) || 0;
       recentDays.push({
         date,
-        hatersHandled: dayData?.count || 0,
-        wordsSaved: (dayData?.count || 0) * AVG_WORDS_PER_COMEBACK,
-        hostileWordsDeflected: dayData?.hostileWords || 0
+        hatersHandled: dayCount,
+        wordsSaved: dayCount * AVG_WORDS_PER_COMEBACK,
+        hostileWordsDeflected: 0, // Would need per-day hostile_words aggregation
       });
     }
 
+    const lastActiveDate = allActivityRows[0]?.date || null;
+    const bestStreak = currentStreak; // No persistent best streak store; use current
+
     const stats: AchievementStats = {
       today: {
-        hatersHandled: todayHatersHandled,
-        minutesSaved: todayHatersHandled * AVG_MINUTES_PER_REPLY,
-        wordsSaved: todayHatersHandled * AVG_WORDS_PER_COMEBACK,
-        hostileWordsDeflected: todayHostileWords
+        hatersHandled: todayResult.count,
+        minutesSaved: todayResult.count * AVG_MINUTES_PER_REPLY,
+        wordsSaved: todayResult.count * AVG_WORDS_PER_COMEBACK,
+        hostileWordsDeflected: hostileWordsTodayResult.total,
       },
       allTime: {
-        hatersHandled: allTimeHatersHandled,
-        minutesSaved: allTimeHatersHandled * AVG_MINUTES_PER_REPLY,
-        wordsSaved: allTimeHatersHandled * AVG_WORDS_PER_COMEBACK,
-        hostileWordsDeflected: allTimeHostileWords
+        hatersHandled: allTimeResult.count,
+        minutesSaved: allTimeResult.count * AVG_MINUTES_PER_REPLY,
+        wordsSaved: allTimeResult.count * AVG_WORDS_PER_COMEBACK,
+        hostileWordsDeflected: hostileWordsAllTime.total,
       },
       streak: {
         current: currentStreak,
         best: bestStreak,
-        lastActiveDate: sortedDates[0] || null
+        lastActiveDate,
       },
-      recentDays
+      recentDays,
     };
 
     res.json({ success: true, stats });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Achievement stats error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    res.status(500).json({ success: false, error: message });
   }
 });
 
 /**
  * GET /api/stats/leaderboard
- * Weekly/monthly leaderboard (for SaaS multi-tenant)
+ * Weekly/monthly leaderboard (placeholder)
  */
-router.get('/leaderboard', async (req, res: Response) => {
-  try {
-    // Future: aggregate stats across accounts for leaderboard
-    // For now, return placeholder
-    res.json({
-      success: true,
-      leaderboard: [],
-      message: 'Leaderboard coming soon'
-    });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+router.get('/leaderboard', (_req, res: Response) => {
+  res.json({
+    success: true,
+    leaderboard: [],
+    message: 'Leaderboard coming soon',
+  });
 });
 
 export default router;

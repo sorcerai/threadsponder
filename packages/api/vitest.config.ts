@@ -7,15 +7,10 @@ export default defineConfig({
     testTimeout: 10000,
     setupFiles: ['./src/__tests__/setup.ts'],
     env: {
-      SUPABASE_URL: 'https://test.supabase.co',
-      SUPABASE_ANON_KEY: 'test-anon-key',
-      SUPABASE_SERVICE_KEY: 'test-service-key',
+      SQLITE_DB_PATH: ':memory:',
       CREDENTIAL_ENCRYPTION_KEY: Buffer.from('test-encryption-key-32bytes!!!!!').toString('base64'),
       DEFAULT_ORG_ID: 'test-org',
       NODE_ENV: 'test',
-      UPSTASH_REDIS_REST_URL: 'https://test.upstash.io',
-      UPSTASH_REDIS_REST_TOKEN: 'test-token',
-      UPSTASH_REDIS_URL: 'redis://default:test@test.upstash.io:6379',
     },
   },
 });

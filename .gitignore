@@ -50,5 +50,10 @@ coverage/
 # Stale dashboard build artifacts
 packages/dashboard/packages/
 
-# Supabase local temp
-supabase/.temp/
+# SQLite database files
+*.db
+*.db-wal
+*.db-shm
+
+# Voice document uploads
+voice-uploads/

@@ -109,11 +109,11 @@ export function createRateLimiter(config: RateLimitConfig): RequestHandler {
   return rateLimit({
     windowMs,
     max: maxRequests,
-    keyGenerator,
+    keyGenerator: keyGenerator as any,
     standardHeaders: true,
     legacyHeaders: false,
     message: JSON.stringify({ error: message }),
-  });
+  }) as unknown as RequestHandler;
 }
 
 /**
