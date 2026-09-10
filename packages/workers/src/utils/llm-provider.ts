@@ -10,6 +10,11 @@
 
 import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import OpenAI from 'openai';
+import { waitForHuman, type InferenceKind } from '@threadsponder/shared';
+
+export function isHumanEnabled(): boolean {
+  return process.env.HUMAN_INFERENCE_ENABLED === 'true';
+}
 import { logger } from './shared-logger.js';
 
 // Environment configuration
@@ -21,6 +26,8 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp';
 const OPENROUTER_MODEL = process.env.OPENROUTER_FALLBACK_MODEL || 'google/gemini-2.0-flash-exp:free';
 
 export interface GenerateOptions {
+  kind?: InferenceKind;
+  context?: unknown;
   temperature?: number;
   maxTokens?: number;
   timeout?: number;
@@ -29,7 +36,7 @@ export interface GenerateOptions {
 export interface GenerateResult {
   success: boolean;
   text: string;
-  provider: 'gemini' | 'openrouter' | 'none';
+  provider: 'human' | 'gemini' | 'openrouter' | 'none';
   error?: string;
   latencyMs?: number;
 }
@@ -237,6 +244,16 @@ export async function generateWithFallback(
   prompt: string,
   options: GenerateOptions = {}
 ): Promise<GenerateResult> {
+  if (isHumanEnabled()) {
+    const start = Date.now();
+    try {
+      const text = await waitForHuman(options.kind ?? 'respond', { prompt, ...options });
+      return { success: text !== null, text: text ?? '', provider: text === null ? 'none' : 'human',
+        latencyMs: Date.now() - start, ...(text === null ? { error: 'Human inference expired' } : {}) };
+    } catch (error) {
+      return { success: false, text: '', provider: 'none', error: error instanceof Error ? error.message : 'Human inference failed' };
+    }
+  }
   const gemini = getGeminiProvider();
   const openRouter = getOpenRouterProvider();
 
@@ -280,14 +297,15 @@ export async function generateWithFallback(
  * Check if any LLM provider is available
  */
 export function isLLMAvailable(): boolean {
-  return getGeminiProvider().isAvailable() || getOpenRouterProvider().isAvailable();
+  return isHumanEnabled() || getGeminiProvider().isAvailable() || getOpenRouterProvider().isAvailable();
 }
 
 /**
  * Get status of all providers
  */
-export function getProviderStatus(): { gemini: boolean; openRouter: boolean } {
+export function getProviderStatus(): { human: boolean; gemini: boolean; openRouter: boolean } {
   return {
+    human: isHumanEnabled(),
     gemini: getGeminiProvider().isAvailable(),
     openRouter: getOpenRouterProvider().isAvailable(),
   };

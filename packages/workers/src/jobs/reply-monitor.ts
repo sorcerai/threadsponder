@@ -42,7 +42,7 @@ function hasProcessedReply(accountId: string, replyId: string): boolean {
   const db = getDb();
   return !!db
     .prepare('SELECT id FROM reply_history WHERE account_id = ? AND threads_reply_id = ?')
-    .get(accountId, replyId);
+    .get(accountId, replyId) || !!db.prepare('SELECT id FROM pending_replies WHERE account_id = ? AND threads_reply_id = ?').get(accountId, replyId);
 }
 
 function isCommentTooOld(timestamp: string): boolean {
@@ -89,9 +89,10 @@ function recordReplyHistory(
   );
 }
 
-async function processReply(
+export async function processReply(
   ctx: {
     accountId: string;
+    requireApproval?: boolean;
     threadsAccountId: string;
     ownUsername: string | null;
     client: ThreadsClient;
@@ -127,8 +128,12 @@ async function processReply(
     ctx.parentPost.text,
     reply.text,
     reply.username,
-    OPENROUTER_API_KEY
+    OPENROUTER_API_KEY,
+    undefined,
+    { accountId: ctx.accountId, threadsAccountId: ctx.threadsAccountId, replyId: reply.id, parentPostId: ctx.parentPost.id }
   );
+
+  if (classificationResult.classification === 'skip') return skip(classificationResult.reasoning);
 
   if (classificationResult.injectionDetected) {
     return skip('Injection detected');
@@ -174,6 +179,10 @@ async function processReply(
   }
 
   const responseCtx: ResponseContext = {
+    accountId: ctx.accountId,
+    threadsAccountId: ctx.threadsAccountId,
+    replyId: reply.id,
+    parentPostId: ctx.parentPost.id,
     originalPost: ctx.parentPost.text,
     replyText: reply.text,
     username: reply.username,
@@ -208,6 +217,14 @@ async function processReply(
     response: generatedResponse.reply,
   };
 
+  if (ctx.requireApproval !== false) {
+    getDb().prepare(`INSERT OR IGNORE INTO pending_replies
+      (account_id, threads_account_id, threads_reply_id, payload, response)
+      VALUES (?, ?, ?, ?, ?)`).run(ctx.accountId, ctx.threadsAccountId, reply.id,
+        JSON.stringify({ parentPost: ctx.parentPost, reply, classification: classificationResult }), generatedResponse.reply);
+    return { ...base, posted: false, postId: null };
+  }
+
   try {
     const posted = await ctx.client.replyToPost(reply.id, generatedResponse.reply);
 
@@ -228,7 +245,19 @@ async function processReply(
   return result;
 }
 
-export async function runReplyMonitor(
+const runningAccounts = new Set<string>();
+
+export async function runReplyMonitor(accountId: string, threadsAccountId: string): Promise<{ processed: number; posted: number }> {
+  if (runningAccounts.has(accountId)) return { processed: 0, posted: 0 };
+  runningAccounts.add(accountId);
+  try {
+    return await monitorAccount(accountId, threadsAccountId);
+  } finally {
+    runningAccounts.delete(accountId);
+  }
+}
+
+async function monitorAccount(
   accountId: string,
   threadsAccountId: string
 ): Promise<{ processed: number; posted: number }> {
@@ -267,6 +296,7 @@ export async function runReplyMonitor(
     threadsAccountId,
     ownUsername: credentials.username,
     client,
+    requireApproval: config.requireApproval,
     voiceSettings: config.voiceSettings,
     voiceExamples,
     friends: config.friends,

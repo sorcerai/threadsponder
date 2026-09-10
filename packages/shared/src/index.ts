@@ -4,6 +4,7 @@ export * from './types/index.js';
 
 // SQLite client (replaces Supabase)
 export * from './db/sqlite.js';
+export * from './db/human-queue.js';
 
 // Threads API client
 export * from './clients/threads.js';

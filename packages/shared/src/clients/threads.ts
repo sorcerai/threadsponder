@@ -18,7 +18,7 @@ export class ThreadsClient {
   private accessToken: string;
   private userId: string;
   private api: AxiosInstance;
-  private readonly baseUrl = 'https://graph.threads.net/v1.0';
+  private readonly baseUrl = process.env.THREADS_API_BASE_URL || 'https://graph.threads.net/v1.0';
 
   constructor(config: { accessToken: string; userId: string }) {
     this.accessToken = config.accessToken;
@@ -164,6 +164,14 @@ export class ThreadsClient {
       const errorMsg = axiosError.response?.data?.error?.message || axiosError.message || 'Unknown error';
       return { success: false, error: errorMsg };
     }
+  }
+
+  /** Read-only keyword search; never creates posts or focused-post subscriptions. */
+  async searchPosts(query: string): Promise<Array<{ id: string; text: string; username?: string; permalink?: string }>> {
+    const response = await this.api.get('/keyword_search', {
+      params: { q: query, search_type: 'RECENT', fields: 'id,text,username,permalink,timestamp', limit: 25 },
+    });
+    return response.data?.data ?? [];
   }
 
   /**

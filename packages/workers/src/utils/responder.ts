@@ -9,6 +9,7 @@
 
 import type { VoiceSettings, VoiceExample, Friend } from '@threadsponder/shared';
 import type { Classification } from './classifier.js';
+import { generateWithFallback, isHumanEnabled } from './llm-provider.js';
 /** Attack vector from insecurity provider (feature removed — type kept for interface compat) */
 interface AttackVector {
   archetype: string;
@@ -30,6 +31,10 @@ export interface VoiceStyle {
 }
 
 export interface ResponseContext {
+  accountId?: string;
+  threadsAccountId?: string;
+  replyId?: string;
+  parentPostId?: string;
   originalPost: string;
   replyText: string;
   username: string;
@@ -351,6 +356,13 @@ ${stylePrompt}
 ${voiceExamplesPrompt}${recentSection}
 
 Generate a reply. Output ONLY the reply text, nothing else. No quotes, no explanation.`;
+
+  if (isHumanEnabled()) {
+    const result = await generateWithFallback(prompt, { kind: 'respond', context: ctx });
+    return { reply: result.success ? result.text : '', source: result.provider,
+      generationTimeMs: Date.now() - startTime, voiceExamplesUsed: ctx.voiceExamples.length,
+      isFriend, friendMode };
+  }
 
   const maxRetries = 2;
 

@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { HUMAN_SCHEMA_SQL } from './human-schema.js';
 
 // Inlined so it survives tsc without a separate .sql copy step
 const SCHEMA_SQL = `
@@ -211,7 +212,10 @@ export function getDb(): Database.Database {
   _db.pragma('foreign_keys = ON');
   _db.pragma('synchronous = NORMAL');
 
-  _db.exec(SCHEMA_SQL);
+  _db.transaction(() => {
+    _db!.exec(SCHEMA_SQL);
+    _db!.exec(HUMAN_SCHEMA_SQL);
+  })();
 
   return _db;
 }

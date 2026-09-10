@@ -10,6 +10,7 @@ import http from 'http';
 import { scheduleMonitoringJobs } from './jobs/reply-monitor.js';
 import { scheduleDuePosts } from './jobs/post-scheduler.js';
 import { scheduleMetricsJobs } from './jobs/metrics-collector.js';
+import { scheduleDiscoveryJobs } from './jobs/discovery.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -55,6 +56,14 @@ cron.schedule('*/5 * * * *', async () => {
     await scheduleMetricsJobs();
   } catch (error) {
     console.error('[Scheduler] Metrics collector failed:', error);
+  }
+});
+
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    await scheduleDiscoveryJobs();
+  } catch {
+    console.error('[Scheduler] Discovery failed');
   }
 });
 

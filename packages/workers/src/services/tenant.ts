@@ -20,6 +20,9 @@ import type {
 } from '@threadsponder/shared';
 
 export interface TenantConfig {
+  requireApproval: boolean;
+  discoveryEnabled: boolean;
+  discoveryQueries: string[];
   account: Account;
   threadsAccounts: ThreadsAccount[];
   voiceSettings: VoiceSettings | null;
@@ -57,7 +60,14 @@ export class TenantService {
       .prepare('SELECT * FROM friends WHERE account_id = ?')
       .all(accountId) as Friend[];
 
-    return { account, threadsAccounts, voiceSettings, friends };
+    const settings = db.prepare('SELECT * FROM automation_settings WHERE account_id = ?').get(accountId) as
+      { require_approval: number; discovery_enabled: number; discovery_queries: string } | undefined;
+    const queries: unknown = JSON.parse(settings?.discovery_queries ?? '[]');
+    return { account, threadsAccounts, voiceSettings, friends,
+      requireApproval: settings?.require_approval !== 0,
+      discoveryEnabled: settings?.discovery_enabled === 1,
+      discoveryQueries: Array.isArray(queries) ? queries.filter((q): q is string => typeof q === 'string' && q.trim().length > 0) : [],
+    };
   }
 
   getThreadsCredentials(threadsAccountId: string): ThreadsCredentials | null {

@@ -6,6 +6,7 @@
  */
 
 import type { ReplyHistory } from '@threadsponder/shared';
+import { generateWithFallback, isHumanEnabled } from './llm-provider.js';
 
 // OpenRouter config
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -134,7 +135,8 @@ export async function classifyReply(
   replyText: string,
   username: string,
   apiKey: string,
-  model: string = 'meta-llama/llama-3.3-70b-instruct'
+  model: string = 'meta-llama/llama-3.3-70b-instruct',
+  context?: Record<string, unknown>
 ): Promise<ClassificationResult> {
   // Check for injection attempts first
   if (containsInjectionAttempt(replyText)) {
@@ -166,6 +168,14 @@ Classify as:
 - hostile: attacks, insults, trolling, mockery, negativity
 
 Output format: {"classification": "friendly"|"neutral"|"hostile", "confidence": 0.0-1.0, "reasoning": "brief explanation"}`;
+
+  if (isHumanEnabled()) {
+    const result = await generateWithFallback(prompt, { kind: 'classify',
+      context: { ...context, originalPost, replyText, username } });
+    if (!result.success) return { classification: 'skip', confidence: 1,
+      reasoning: result.error ?? 'Human inference unavailable', injectionDetected: false, isMetaComment: metaDetected };
+    return { ...JSON.parse(result.text), injectionDetected: false, isMetaComment: metaDetected };
+  }
 
   const maxRetries = 3;
 
