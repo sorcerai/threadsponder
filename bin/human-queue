@@ -1,0 +1,67 @@
+#!/usr/bin/env node
+// Local operator tool. Deliberately has no publishing capability.
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const help = `human-queue [list [inference|replies|discovery] | show <queue> <id> | answer <id> <file.json> | review <id> <approved|rejected> | config <account-id> <file.json>]
+No args: oldest 50 pending inference items. show returns full JSON context.
+answer: respond={"text":"..."}; classify={"classification":"neutral","confidence":1,"reasoning":"..."}
+config: {"requireApproval":true,"discoveryEnabled":false,"discoveryQueries":[]}
+review records a decision only; NEVER publishes. Publish approved replies manually in Threads.
+Examples:
+  bin/human-queue
+  bin/human-queue show inference <id>
+  bin/human-queue answer <id> /tmp/answer.json`;
+const out = value => console.log(JSON.stringify(value));
+if (args[0] === '--version' && args.length === 1) { console.log('0.1.0'); process.exit(0); }
+if (args.includes('--help')) { console.log(help); process.exit(0); }
+class UsageError extends Error {}
+try {
+  if (args.some(a => a.startsWith('--'))) throw new UsageError('Unknown flag; use human-queue --help');
+  const command = args[0] ?? 'list';
+  const tables = { inference: 'pending_inference', replies: 'pending_replies', discovery: 'discovery_candidates' };
+  if (!['list','show','answer','review','config'].includes(command)) throw new UsageError('Unknown command; use human-queue --help');
+  const { getDb, expireInference, submitAnswer } = require('../packages/shared/dist/index.js');
+  const db = getDb();
+  expireInference();
+  if (command === 'list' || command === 'show') {
+    const queue = args[1] ?? 'inference';
+    const table = tables[queue];
+    if (!table || (command === 'list' && args.length > 2) || (command === 'show' && args.length !== 3)) throw new UsageError('Use human-queue list [queue] or show <queue> <id>');
+    if (command === 'show') {
+      const row = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(args[2]);
+      if (!row) throw new Error('Item not found; use human-queue list');
+      row.payload = JSON.parse(row.payload);
+      if (row.answer) row.answer = JSON.parse(row.answer);
+      out(row);
+    } else {
+      const total = db.prepare(`SELECT count(*) AS n FROM ${table} WHERE status = 'pending'`).get().n;
+      const items = db.prepare(`SELECT id, ${queue === 'inference' ? 'kind' : 'account_id'}, status, created_at FROM ${table} WHERE status = 'pending' ORDER BY created_at, id LIMIT 50`).all();
+      out({ queue, total, items, ...(total === 0 ? { message: '0 results' } : { next: `human-queue show ${queue} <id>` }) });
+    }
+  } else if (command === 'answer') {
+    if (args.length !== 3) throw new UsageError('Use human-queue answer <id> <file.json>');
+    out({ id: args[1], status: submitAnswer(args[1], JSON.parse(fs.readFileSync(args[2], 'utf8'))) });
+  } else if (command === 'review') {
+    if (args.length !== 3 || !['approved','rejected'].includes(args[2])) throw new UsageError('Use human-queue review <id> <approved|rejected>');
+    const row = db.prepare('SELECT status FROM pending_replies WHERE id = ?').get(args[1]);
+    if (!row) throw new Error('Reply not found; use human-queue list replies');
+    if (row.status !== 'pending' && row.status !== args[2]) throw new Error('Reply already reviewed');
+    db.prepare("UPDATE pending_replies SET status = ? WHERE id = ? AND status = 'pending'").run(args[2], args[1]);
+    out({ id: args[1], status: args[2], published: false });
+  } else {
+    if (args.length !== 3) throw new UsageError('Use human-queue config <account-id> <file.json>');
+    const config = JSON.parse(fs.readFileSync(args[2], 'utf8'));
+    if (!config || typeof config.requireApproval !== 'boolean' || typeof config.discoveryEnabled !== 'boolean' ||
+        !Array.isArray(config.discoveryQueries) || !config.discoveryQueries.every(q => typeof q === 'string' && q.trim()) ||
+        Object.keys(config).some(k => !['requireApproval','discoveryEnabled','discoveryQueries'].includes(k))) throw new UsageError('Config requires requireApproval, discoveryEnabled booleans and discoveryQueries string array');
+    if (!db.prepare('SELECT id FROM accounts WHERE id = ?').get(args[1])) throw new Error('Account not found; check account ID');
+    db.prepare(`INSERT INTO automation_settings (account_id, require_approval, discovery_enabled, discovery_queries) VALUES (?, ?, ?, ?)
+      ON CONFLICT(account_id) DO UPDATE SET require_approval=excluded.require_approval, discovery_enabled=excluded.discovery_enabled, discovery_queries=excluded.discovery_queries`)
+      .run(args[1], Number(config.requireApproval), Number(config.discoveryEnabled), JSON.stringify(config.discoveryQueries));
+    out({ accountId: args[1], ...config });
+  }
+} catch (error) {
+  const expected = error instanceof UsageError || !error.code;
+  out({ error: expected ? error.message : 'Unable to access queue or JSON file', suggestion: 'Check SQLITE_DB_PATH, run pnpm build, and use human-queue --help' });
+  process.exitCode = error instanceof UsageError ? 2 : 1;
+}
