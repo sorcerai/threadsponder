@@ -15,6 +15,25 @@ import { waitForHuman, type InferenceKind } from '@threadsponder/shared';
 export function isHumanEnabled(): boolean {
   return process.env.HUMAN_INFERENCE_ENABLED === 'true';
 }
+
+/**
+ * Human-inference bypass for the resume job (Step 2).
+ *
+ * The async monitor enqueues human inference and exits; the resume job
+ * consumes answered rows and must run classification/generation through
+ * real LLMs. Setting this flag routes generateWithFallback past the human
+ * branch even when HUMAN_INFERENCE_ENABLED=true, so an operator's answer
+ * can never re-enter the human queue (infinite ping-pong).
+ *
+ * Only the resume job sets this; the monitor path leaves it false.
+ */
+let humanBypass = false;
+export function setHumanBypass(on: boolean): void {
+  humanBypass = on;
+}
+export function isHumanBypassed(): boolean {
+  return humanBypass;
+}
 import { logger } from './shared-logger.js';
 
 // Environment configuration
@@ -236,6 +255,12 @@ function getOpenRouterProvider(): OpenRouterProvider {
  * Tries Gemini SDK first (faster, direct API)
  * Falls back to OpenRouter on failure (rate limit, timeout, error)
  *
+ * When HUMAN_INFERENCE_ENABLED=true the human queue is the first provider:
+ * generateWithFallback blocks on waitForHuman. The async monitor never calls
+ * this path; instead it enqueues inference and the resume job runs with
+ * human inference bypassed (forceHumanBypass) so an operator answer can
+ * never re-enter the human queue.
+ *
  * @param prompt - The prompt to send to the LLM
  * @param options - Generation options (temperature, maxTokens, timeout)
  * @returns GenerateResult with text, provider used, and timing info
@@ -244,7 +269,7 @@ export async function generateWithFallback(
   prompt: string,
   options: GenerateOptions = {}
 ): Promise<GenerateResult> {
-  if (isHumanEnabled()) {
+  if (isHumanEnabled() && !humanBypass) {
     const start = Date.now();
     try {
       const text = await waitForHuman(options.kind ?? 'respond', { prompt, ...options });

@@ -230,6 +230,10 @@ export class ThreadsClient {
       mediaUrl: string | null;
       hasReplies: boolean;
       isReplyOwnedByMe: boolean;
+      /** API-provided parent link — the only trusted source of parentage. */
+      repliedToId?: string;
+      /** API-provided root-post link. */
+      rootPostId?: string;
     }>;
     error?: string;
   }> {
@@ -237,7 +241,7 @@ export class ThreadsClient {
       const response = await this.api.get(`/${postId}/replies`, {
         params: {
           fields:
-            'id,text,username,permalink,timestamp,media_type,media_url,has_replies,is_reply_owned_by_me',
+            'id,text,username,permalink,timestamp,media_type,media_url,has_replies,is_reply_owned_by_me,replied_to,root_post',
           limit,
         },
       });
@@ -253,11 +257,61 @@ export class ThreadsClient {
           mediaUrl: (reply.media_url as string) || null,
           hasReplies: (reply.has_replies as boolean) || false,
           isReplyOwnedByMe: (reply.is_reply_owned_by_me as boolean) || false,
+          repliedToId: (reply.replied_to as { id?: string } | undefined)?.id,
+          rootPostId: (reply.root_post as { id?: string } | undefined)?.id,
         }));
         return { success: true, replies };
       }
 
       return { success: true, replies: [] };
+    } catch (error: unknown) {
+      const axiosError = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
+      const errorMsg = axiosError.response?.data?.error?.message || axiosError.message || 'Unknown error';
+      return { success: false, error: errorMsg };
+    }
+  }
+
+  /**
+   * Fetch a single reply by ID with its API-provided parentage.
+   * Used by the conversation builder to verify the parent chain hop by hop.
+   */
+  async getReplyById(replyId: string): Promise<{
+    success: boolean;
+    reply?: {
+      id: string;
+      text: string;
+      username: string;
+      timestamp: string;
+      isReplyOwnedByMe: boolean;
+      repliedToId?: string;
+      rootPostId?: string;
+    };
+    error?: string;
+  }> {
+    try {
+      const response = await this.api.get(`/${replyId}`, {
+        params: {
+          fields: 'id,text,username,timestamp,is_reply_owned_by_me,replied_to,root_post',
+        },
+      });
+
+      if (response.data) {
+        const r = response.data as Record<string, unknown>;
+        return {
+          success: true,
+          reply: {
+            id: r.id as string,
+            text: (r.text as string) || '',
+            username: (r.username as string) || 'unknown',
+            timestamp: r.timestamp as string,
+            isReplyOwnedByMe: (r.is_reply_owned_by_me as boolean) || false,
+            repliedToId: (r.replied_to as { id?: string } | undefined)?.id,
+            rootPostId: (r.root_post as { id?: string } | undefined)?.id,
+          },
+        };
+      }
+
+      return { success: false, error: 'No data returned' };
     } catch (error: unknown) {
       const axiosError = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
       const errorMsg = axiosError.response?.data?.error?.message || axiosError.message || 'Unknown error';

@@ -6,6 +6,9 @@ export * from './types/index.js';
 export * from './db/sqlite.js';
 export * from './db/human-queue.js';
 
+// Structured conversation context (obs#17031)
+export * from './conversation.js';
+
 // Threads API client
 export * from './clients/threads.js';
 

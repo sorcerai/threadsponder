@@ -7,7 +7,7 @@
  * - Friends list awareness for special treatment
  */
 
-import type { VoiceSettings, VoiceExample, Friend } from '@threadsponder/shared';
+import type { VoiceSettings, VoiceExample, Friend, ConversationContext } from '@threadsponder/shared';
 import type { Classification } from './classifier.js';
 import { generateWithFallback, isHumanEnabled } from './llm-provider.js';
 /** Attack vector from insecurity provider (feature removed — type kept for interface compat) */
@@ -47,6 +47,8 @@ export interface ResponseContext {
   recentReplies?: string[];  // Recent bot replies to avoid repetition
   attackVector?: AttackVector | null;  // P0: Loser Dossier attack angle
   previousRepliesInThread?: string[];  // Previous replies in this thread for context
+  /** Step 3 (obs#17031): verified conversation tree — preferred over flat previousRepliesInThread. */
+  conversation?: ConversationContext;
 }
 
 export interface GeneratedResponse {
@@ -319,9 +321,28 @@ PRIORITY: This psychological weakness overrides generic hostile replies.
     ? `\n🚫 RECENTLY USED (DO NOT repeat or paraphrase):\n${ctx.recentReplies.slice(0, 8).map(r => `- "${r}"`).join('\n')}\n\nBe DIFFERENT from the above.`
     : '';
 
-  // Build thread context section for conversation awareness
+  // Build thread context section for conversation awareness.
+  // Step 3 (obs#17031): prefer the verified conversation tree when present;
+  // fall back to the flat previousRepliesInThread list otherwise.
   let threadContextSection = '';
-  if (ctx.previousRepliesInThread && ctx.previousRepliesInThread.length > 0) {
+  if (ctx.conversation) {
+    const conv = ctx.conversation;
+    const chainLines = conv.parentChain.map((m, i) => {
+      const own = m.isOwnReply ? ' (OUR REPLY)' : '';
+      return `  ${i + 1}. @${m.username}${own}: "${m.text.substring(0, 200)}"`;
+    });
+    threadContextSection = `
+
+[CONVERSATION TREE — verified parentage from the Threads API, depth ${conv.depth}]
+${chainLines.length > 0 ? chainLines.join('\n') : '  (target replies directly to the focused post)'}
+
+⚠️ THREAD AWARENESS RULES:
+- Your reply must make sense at depth ${conv.depth} of THIS thread, not in isolation
+- If they are continuing an earlier exchange, respond to the thread — not just the last line
+- If they're misquoting or strawmanning anything said above → call it out
+- Don't repeat points our earlier replies already made
+- Reference specific things from the thread if relevant (but stay brief)`;
+  } else if (ctx.previousRepliesInThread && ctx.previousRepliesInThread.length > 0) {
     const sanitizedReplies = ctx.previousRepliesInThread
       .slice(0, 5)  // Limit to last 5 replies
       .map((r, i) => `  ${i + 1}. "${r.substring(0, 200)}"`)  // Truncate long replies

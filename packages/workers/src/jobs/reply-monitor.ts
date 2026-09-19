@@ -3,22 +3,36 @@
  *
  * Per-tenant job that:
  * 1. Fetches replies on focused posts
- * 2. Classifies each reply
- * 3. Generates and posts responses
+ * 2. Builds the verified conversation context for each reply (obs#17031)
+ * 3. Classifies each reply / generates responses
  * 4. Records history for analytics
+ *
+ * Step 2 (async HIL): the monitor NEVER blocks on a human answer. When
+ * HUMAN_INFERENCE_ENABLED=true it enqueues inference and exits; the resume
+ * job (jobs/human-resume.ts) continues the workflow when answered.
+ *
+ * Concurrency: DB-backed claims (processing_claims) replace the old
+ * in-process runningAccounts guard and the read-before-work
+ * hasProcessedReply check, so concurrent workers can't duplicate work.
  */
 
-import { ThreadsClient, ClassificationType, getDb, VoiceSettings, VoiceExample, Friend } from '@threadsponder/shared';
+import {
+  ThreadsClient, ClassificationType, getDb, VoiceSettings, VoiceExample, Friend,
+  ConversationContext, buildConversationContext, summarizeConversation,
+  claimScope, releaseScope, tickScope, replyScope, TICK_LEASE_TTL_MS,
+  enqueueHumanInference,
+} from '@threadsponder/shared';
 import { getTenantService } from '../services/tenant.js';
 import { classifyReply, Classification } from '../utils/classifier.js';
 import { generateResponse, ResponseContext } from '../utils/responder.js';
+import { isHumanEnabled } from '../utils/llm-provider.js';
 
 export interface MonitorJobData {
   accountId: string;
   threadsAccountId: string;
 }
 
-interface ProcessedReply {
+export interface ProcessedReply {
   replyId: string;
   username: string;
   text: string;
@@ -37,13 +51,6 @@ const MAX_CONVERSATION_DEPTH = 3;
 
 // Maximum age for comments we'll reply to
 const MAX_COMMENT_AGE_MS = 24 * 60 * 60 * 1000;
-
-function hasProcessedReply(accountId: string, replyId: string): boolean {
-  const db = getDb();
-  return !!db
-    .prepare('SELECT id FROM reply_history WHERE account_id = ? AND threads_reply_id = ?')
-    .get(accountId, replyId) || !!db.prepare('SELECT id FROM pending_replies WHERE account_id = ? AND threads_reply_id = ?').get(accountId, replyId);
-}
 
 function isCommentTooOld(timestamp: string): boolean {
   try {
@@ -89,20 +96,41 @@ function recordReplyHistory(
   );
 }
 
+/** Our prior replies in a focused-post thread, from structured history. */
+function getOurPriorReplies(accountId: string, parentPostId: string): Array<{ id: string; text: string }> {
+  const db = getDb();
+  const fp = db
+    .prepare('SELECT id FROM focused_posts WHERE account_id = ? AND threads_post_id = ?')
+    .get(accountId, parentPostId) as { id: string } | undefined;
+  if (!fp) return [];
+  return db.prepare(
+    `SELECT our_reply_id AS id, our_response AS text FROM reply_history
+     WHERE account_id = ? AND focused_post_id = ? AND replied = 1 AND our_response IS NOT NULL
+     ORDER BY rowid DESC LIMIT 5`
+  ).all(accountId, fp.id) as Array<{ id: string; text: string }>;
+}
+
+export interface ProcessReplyCtx {
+  accountId: string;
+  requireApproval?: boolean;
+  threadsAccountId: string;
+  ownUsername: string | null;
+  client: ThreadsClient;
+  parentPost: { id: string; text: string };
+  voiceSettings: VoiceSettings | null;
+  voiceExamples: VoiceExample[];
+  friends: Friend[];
+  targetClassifications?: string[];
+}
+
+export type IncomingReply = {
+  id: string; text: string; username: string; timestamp?: string; mediaType?: string;
+  repliedToId?: string; rootPostId?: string; isReplyOwnedByMe: boolean;
+};
+
 export async function processReply(
-  ctx: {
-    accountId: string;
-    requireApproval?: boolean;
-    threadsAccountId: string;
-    ownUsername: string | null;
-    client: ThreadsClient;
-    parentPost: { id: string; text: string };
-    voiceSettings: VoiceSettings | null;
-    voiceExamples: VoiceExample[];
-    friends: Friend[];
-    targetClassifications?: string[];
-  },
-  reply: { id: string; text: string; username: string; timestamp?: string; mediaType?: string }
+  ctx: ProcessReplyCtx,
+  reply: IncomingReply
 ): Promise<ProcessedReply> {
   const skip = (error: string): ProcessedReply => ({
     replyId: reply.id,
@@ -116,107 +144,172 @@ export async function processReply(
     error,
   });
 
-  if (hasProcessedReply(ctx.accountId, reply.id)) {
-    return skip('Already processed');
+  // Atomic per-reply claim: replaces the old read-before-work
+  // hasProcessedReply check. A concurrent worker racing here gets a clean
+  // skip instead of duplicating classification/generation.
+  const scope = replyScope(ctx.accountId, reply.id);
+  if (!claimScope(scope)) {
+    return skip('Already claimed by another worker');
   }
 
-  if (ctx.ownUsername?.toLowerCase() === reply.username.toLowerCase()) {
-    return skip('Own reply');
+  try {
+    if (ctx.ownUsername?.toLowerCase() === reply.username.toLowerCase()) {
+      releaseScope(scope);
+      return skip('Own reply');
+    }
+
+    // Step 3 (obs#17031): verify the conversation tree from the API's own
+    // replied_to linkage. Missing or ambiguous parentage is a hard skip —
+    // we never infer parentage from traversal, timestamps, or mentions.
+    const built = await buildConversationContext(
+      ctx.client,
+      ctx.parentPost,
+      {
+        id: reply.id,
+        text: reply.text,
+        username: reply.username,
+        timestamp: reply.timestamp,
+        isReplyOwnedByMe: reply.isReplyOwnedByMe,
+        repliedToId: reply.repliedToId,
+        rootPostId: reply.rootPostId,
+      },
+      getOurPriorReplies(ctx.accountId, ctx.parentPost.id)
+    );
+    if (!built.ok) {
+      console.log(`[Monitor] Skipping reply ${reply.id}: ${built.reason}`);
+      releaseScope(scope);
+      return skip(`Unverifiable conversation: ${built.reason}`);
+    }
+    const conversation = built.context;
+    console.log(`[Monitor] Reply ${reply.id}: ${summarizeConversation(conversation)}`);
+
+    if (conversation.depth > MAX_CONVERSATION_DEPTH) {
+      releaseScope(scope);
+      return skip(`Conversation depth ${conversation.depth} exceeds max ${MAX_CONVERSATION_DEPTH}`);
+    }
+
+    // Async HIL: enqueue classification and exit. The resume job continues
+    // the workflow when the operator answers. The cron tick is never held.
+    if (isHumanEnabled()) {
+      const inferenceId = enqueueHumanInference('classify', {
+        stage: 'classify',
+        claimScope: scope,
+        accountId: ctx.accountId,
+        threadsAccountId: ctx.threadsAccountId,
+        requireApproval: ctx.requireApproval,
+        targetClassifications: ctx.targetClassifications,
+        parentPost: ctx.parentPost,
+        reply: { id: reply.id, text: reply.text, username: reply.username, timestamp: reply.timestamp },
+        conversation,
+      });
+      console.log(`[Monitor] Enqueued classify inference ${inferenceId} for reply ${reply.id}; exiting`);
+      // Claim is intentionally NOT released here: it is held until the
+      // resume job finishes the workflow (or the reaper releases it on
+      // expiry), so no other tick re-enqueues this reply.
+      return {
+        replyId: reply.id,
+        username: reply.username,
+        text: reply.text,
+        classification: 'skip',
+        confidence: 1,
+        response: null,
+        posted: false,
+        postId: null,
+        error: `Awaiting human classification (inference ${inferenceId})`,
+      };
+    }
+
+    const result = await runReplyWorkflow(ctx, conversation, reply, null);
+    releaseScope(scope);
+    return result;
+  } catch (error) {
+    releaseScope(scope);
+    throw error;
+  }
+}
+
+export interface ClassificationInput {
+  classification: Classification;
+  confidence: number;
+  reasoning: string;
+  injectionDetected?: boolean;
+  isMetaComment?: boolean;
+}
+
+
+/**
+ * Post-classification checks shared by the monitor (LLM path) and the
+ * resume job (human-answer path). Returns a skip result when the reply
+ * should not proceed, or null when the workflow may continue.
+ */
+export function checkClassification(
+  ctx: ProcessReplyCtx,
+  reply: IncomingReply,
+  cls: ClassificationInput
+): ProcessedReply | null {
+  const skipResult = (error: string): ProcessedReply => ({
+    replyId: reply.id,
+    username: reply.username,
+    text: reply.text,
+    classification: cls.classification,
+    confidence: cls.confidence,
+    response: null,
+    posted: false,
+    postId: null,
+    error,
+  });
+
+  if (cls.classification === 'skip') {
+    return skipResult(cls.reasoning || 'skipped');
   }
 
-  const classificationResult = await classifyReply(
-    ctx.parentPost.text,
-    reply.text,
-    reply.username,
-    OPENROUTER_API_KEY,
-    undefined,
-    { accountId: ctx.accountId, threadsAccountId: ctx.threadsAccountId, replyId: reply.id, parentPostId: ctx.parentPost.id }
-  );
-
-  if (classificationResult.classification === 'skip') return skip(classificationResult.reasoning);
-
-  if (classificationResult.injectionDetected) {
-    return skip('Injection detected');
+  if (cls.injectionDetected) {
+    return skipResult('Injection detected');
   }
 
   if (
     ctx.targetClassifications &&
     ctx.targetClassifications.length > 0 &&
-    !ctx.targetClassifications.includes(classificationResult.classification as ClassificationType)
+    !ctx.targetClassifications.includes(cls.classification as ClassificationType)
   ) {
     console.log(
-      `[Monitor] Skipping @${reply.username} - classification=${classificationResult.classification} not in targets [${ctx.targetClassifications.join(', ')}]`
+      `[Monitor] Skipping @${reply.username} - classification=${cls.classification} not in targets [${ctx.targetClassifications.join(', ')}]`
     );
-    return {
-      replyId: reply.id,
-      username: reply.username,
-      text: reply.text,
-      classification: classificationResult.classification,
-      confidence: classificationResult.confidence,
-      response: null,
-      posted: false,
-      postId: null,
-      error: `Not in target classifications: ${ctx.targetClassifications.join(', ')}`,
-    };
+    return skipResult(`Not in target classifications: ${ctx.targetClassifications.join(', ')}`);
   }
 
   // Skip very-low-confidence neutral (classifier is uncertain)
-  if (classificationResult.classification === 'neutral' && classificationResult.confidence < 0.3) {
+  if (cls.classification === 'neutral' && cls.confidence < 0.3) {
     console.log(
-      `[Monitor] Skipping @${reply.username} - neutral, confidence=${classificationResult.confidence.toFixed(2)} too low`
+      `[Monitor] Skipping @${reply.username} - neutral, confidence=${cls.confidence.toFixed(2)} too low`
     );
-    return {
-      replyId: reply.id,
-      username: reply.username,
-      text: reply.text,
-      classification: classificationResult.classification,
-      confidence: classificationResult.confidence,
-      response: null,
-      posted: false,
-      postId: null,
-      error: `classification=${classificationResult.classification}, confidence=${classificationResult.confidence.toFixed(2)}, reason: very low confidence`,
-    };
+    return skipResult(
+      `classification=${cls.classification}, confidence=${cls.confidence.toFixed(2)}, reason: very low confidence`
+    );
   }
 
-  const responseCtx: ResponseContext = {
-    accountId: ctx.accountId,
-    threadsAccountId: ctx.threadsAccountId,
-    replyId: reply.id,
-    parentPostId: ctx.parentPost.id,
-    originalPost: ctx.parentPost.text,
-    replyText: reply.text,
-    username: reply.username,
-    classification: classificationResult.classification,
-    voiceSettings: ctx.voiceSettings,
-    voiceExamples: ctx.voiceExamples,
-    friends: ctx.friends,
-    isMetaComment: classificationResult.isMetaComment,
-    confidence: classificationResult.confidence,
-  };
+  return null;
+}
 
-  const generatedResponse = await generateResponse(responseCtx, OPENROUTER_API_KEY);
-
-  if (!generatedResponse.reply) {
-    return {
-      replyId: reply.id,
-      username: reply.username,
-      text: reply.text,
-      classification: classificationResult.classification,
-      confidence: classificationResult.confidence,
-      response: null,
-      posted: false,
-      postId: null,
-      error: 'Generation failed',
-    };
-  }
-
+/**
+ * Deliver a generated (or human-written) response: queue for approval by
+ * default, or post when the two-key auto-post system is engaged
+ * (requireApproval=false AND THREADS_AUTO_POST=true). Fail-closed always.
+ */
+export async function deliverResponse(
+  ctx: ProcessReplyCtx,
+  reply: IncomingReply,
+  cls: ClassificationInput,
+  responseText: string,
+  conversation?: ConversationContext
+): Promise<ProcessedReply> {
   const base: Omit<ProcessedReply, 'posted' | 'postId' | 'error'> = {
     replyId: reply.id,
     username: reply.username,
     text: reply.text,
-    classification: classificationResult.classification,
-    confidence: classificationResult.confidence,
-    response: generatedResponse.reply,
+    classification: cls.classification,
+    confidence: cls.confidence,
+    response: responseText,
   };
 
   // Auto-post is a two-key system: the DB setting alone is never enough.
@@ -227,7 +320,7 @@ export async function processReply(
     const queued = getDb().prepare(`INSERT OR IGNORE INTO pending_replies
       (account_id, threads_account_id, threads_reply_id, payload, response)
       VALUES (?, ?, ?, ?, ?)`).run(ctx.accountId, ctx.threadsAccountId, reply.id,
-        JSON.stringify({ parentPost: ctx.parentPost, reply, classification: classificationResult }), generatedResponse.reply);
+        JSON.stringify({ parentPost: ctx.parentPost, reply, classification: cls, conversation }), responseText);
     if (queued.changes === 0) {
       console.log(`[Monitor] Reply ${reply.id} already queued (concurrent worker raced here)`);
     }
@@ -237,11 +330,11 @@ export async function processReply(
   console.warn(`[Monitor] AUTO-POST ENGAGED for @${reply.username} (requireApproval=false + THREADS_AUTO_POST=true)`);
 
   try {
-    const posted = await ctx.client.replyToPost(reply.id, generatedResponse.reply);
+    const posted = await ctx.client.replyToPost(reply.id, responseText);
 
     if (posted.success && posted.replyId) {
       console.log(
-        `Posted reply to @${reply.username}: "${generatedResponse.reply.substring(0, 50)}..."`
+        `Posted reply to @${reply.username}: "${responseText.substring(0, 50)}..."`
       );
       const result: ProcessedReply = { ...base, posted: true, postId: posted.replyId };
       recordReplyHistory(ctx.accountId, ctx.parentPost.id, result);
@@ -256,15 +349,87 @@ export async function processReply(
   return result;
 }
 
-const runningAccounts = new Set<string>();
+/**
+ * Shared reply workflow used by the monitor (LLM path). Runs classification
+ * (unless provided, as the resume job does), post-classification checks,
+ * response generation, then delivery via the approval queue or auto-post.
+ */
+export async function runReplyWorkflow(
+  ctx: ProcessReplyCtx,
+  conversation: ConversationContext,
+  reply: IncomingReply,
+  classification: ClassificationInput | null
+): Promise<ProcessedReply> {
+  let cls = classification;
+  if (!cls) {
+    cls = await classifyReply(
+      ctx.parentPost.text,
+      reply.text,
+      reply.username,
+      OPENROUTER_API_KEY,
+      undefined,
+      {
+        accountId: ctx.accountId,
+        threadsAccountId: ctx.threadsAccountId,
+        replyId: reply.id,
+        parentPostId: ctx.parentPost.id,
+        conversation,
+      }
+    );
+  }
+
+  const checked = checkClassification(ctx, reply, cls);
+  if (checked) return checked;
+
+  const responseCtx: ResponseContext = {
+    accountId: ctx.accountId,
+    threadsAccountId: ctx.threadsAccountId,
+    replyId: reply.id,
+    parentPostId: ctx.parentPost.id,
+    originalPost: ctx.parentPost.text,
+    replyText: reply.text,
+    username: reply.username,
+    classification: cls.classification,
+    voiceSettings: ctx.voiceSettings,
+    voiceExamples: ctx.voiceExamples,
+    friends: ctx.friends,
+    isMetaComment: cls.isMetaComment,
+    confidence: cls.confidence,
+    previousRepliesInThread: conversation.ourPriorReplies.map(r => r.text),
+    conversation,
+  };
+
+  const generatedResponse = await generateResponse(responseCtx, OPENROUTER_API_KEY);
+
+  if (!generatedResponse.reply) {
+    return {
+      replyId: reply.id,
+      username: reply.username,
+      text: reply.text,
+      classification: cls.classification,
+      confidence: cls.confidence,
+      response: null,
+      posted: false,
+      postId: null,
+      error: 'Generation failed',
+    };
+  }
+
+  return deliverResponse(ctx, reply, cls, generatedResponse.reply, conversation);
+}
 
 export async function runReplyMonitor(accountId: string, threadsAccountId: string): Promise<{ processed: number; posted: number }> {
-  if (runningAccounts.has(accountId)) return { processed: 0, posted: 0 };
-  runningAccounts.add(accountId);
+  // DB-backed tick lease replaces the in-process runningAccounts guard, so
+  // overlapping cron ticks can't run the same account concurrently even
+  // across worker processes.
+  if (!claimScope(tickScope(accountId), TICK_LEASE_TTL_MS)) {
+    console.log(`[Monitor] Tick for ${accountId} already running elsewhere; skipping`);
+    return { processed: 0, posted: 0 };
+  }
   try {
     return await monitorAccount(accountId, threadsAccountId);
   } finally {
-    runningAccounts.delete(accountId);
+    releaseScope(tickScope(accountId));
   }
 }
 
@@ -302,7 +467,7 @@ async function monitorAccount(
   const voiceExamples = tenantService.getVoiceExamples(accountId);
 
   // Shared context fields constant across all replies for this run
-  const baseCtx = {
+  const baseCtx: Omit<ProcessReplyCtx, 'parentPost'> = {
     accountId,
     threadsAccountId,
     ownUsername: credentials.username,
@@ -351,7 +516,12 @@ async function monitorAccount(
 
         const result = await processReply(
           { ...baseCtx, parentPost },
-          { id: reply.id, text: reply.text, username: reply.username, timestamp: reply.timestamp, mediaType: reply.mediaType }
+          {
+            id: reply.id, text: reply.text, username: reply.username,
+            timestamp: reply.timestamp, mediaType: reply.mediaType,
+            repliedToId: reply.repliedToId, rootPostId: reply.rootPostId,
+            isReplyOwnedByMe: reply.isReplyOwnedByMe,
+          }
         );
 
         totalProcessed++;
@@ -381,7 +551,10 @@ async function monitorAccount(
         }
       }
 
-      // Process nested replies (replies to our replies) up to MAX_CONVERSATION_DEPTH
+      // Process nested replies (replies to our replies) up to MAX_CONVERSATION_DEPTH.
+      // Each candidate's parentage is verified against the API's replied_to
+      // linkage inside processReply — discovery by traversal is only
+      // enumeration; placement in the thread is never assumed.
       if (ourRepliesWithSubReplies.length > 0) {
         console.log(
           `[Monitor] Checking ${ourRepliesWithSubReplies.length} nested conversations...`
@@ -418,7 +591,12 @@ async function monitorAccount(
 
             const result = await processReply(
               { ...baseCtx, parentPost },
-              { id: nestedReply.id, text: nestedReply.text, username: nestedReply.username, timestamp: nestedReply.timestamp, mediaType: nestedReply.mediaType }
+              {
+                id: nestedReply.id, text: nestedReply.text, username: nestedReply.username,
+                timestamp: nestedReply.timestamp, mediaType: nestedReply.mediaType,
+                repliedToId: nestedReply.repliedToId, rootPostId: nestedReply.rootPostId,
+                isReplyOwnedByMe: nestedReply.isReplyOwnedByMe,
+              }
             );
 
             totalProcessed++;

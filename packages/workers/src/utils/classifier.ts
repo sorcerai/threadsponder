@@ -6,6 +6,7 @@
  */
 
 import { generateWithFallback, isHumanEnabled } from './llm-provider.js';
+import type { ConversationContext } from '@threadsponder/shared';
 
 // OpenRouter config
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -156,10 +157,30 @@ export async function classifyReply(
   const safeReply = sanitizeInput(replyText);
   const safeUsername = sanitizeInput(username).replace(/[^a-zA-Z0-9_]/g, '');
 
+  // Step 3 (obs#17031): the classifier sees the verified conversation tree,
+  // never a bare reply + root post.
+  const conversation = context?.conversation as ConversationContext | undefined;
+  let conversationSection = '';
+  if (conversation) {
+    const chainLines = conversation.parentChain.map((m, i) => {
+      const own = m.isOwnReply ? ' (OUR REPLY)' : '';
+      return `  ${i + 1}. @${sanitizeInput(m.username)}${own}: "${sanitizeInput(m.text).substring(0, 200)}"`;
+    });
+    const priorLines = conversation.ourPriorReplies.map((r, i) =>
+      `  ${i + 1}. "${sanitizeInput(r.text).substring(0, 200)}"`);
+    conversationSection = `
+
+[CONVERSATION TREE — verified parentage from the Threads API]
+Depth ${conversation.depth}. Parent chain (oldest first):
+${chainLines.length > 0 ? chainLines.join('\n') : '  (target replies directly to the focused post)'}
+${priorLines.length > 0 ? `Our earlier replies in this thread:\n${priorLines.join('\n')}\n` : ''}Classify the TARGET reply in the context of this thread — a reply that looks
+hostile alone may be banter continuing an earlier exchange, and vice versa.`;
+  }
+
   const prompt = `Classify this social media reply. Output ONLY valid JSON, no markdown.
 
 ORIGINAL POST: "${safeOriginal}"
-REPLY FROM @${safeUsername}: "${safeReply}"
+REPLY FROM @${safeUsername}: "${safeReply}"${conversationSection}
 
 Classify as:
 - friendly: supportive, appreciative, jokes along, positive engagement
