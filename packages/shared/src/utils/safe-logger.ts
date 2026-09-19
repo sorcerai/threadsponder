@@ -69,7 +69,7 @@ function looksLikeSecret(value: string): boolean {
 /**
  * Recursively sanitizes an object, masking sensitive values.
  */
-export function sanitizeForLogging(obj: any, depth = 0): any {
+export function sanitizeForLogging(obj: unknown, depth = 0): unknown {
   // Prevent infinite recursion
   if (depth > 10) {
     return '[Max depth exceeded]';
@@ -103,7 +103,7 @@ export function sanitizeForLogging(obj: any, depth = 0): any {
   }
 
   // Handle regular objects
-  const sanitized: Record<string, any> = {};
+  const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
     if (isSensitiveKey(key)) {
       sanitized[key] = typeof value === 'string' ? maskValue(value) : '••••••••';
@@ -140,19 +140,19 @@ export function createSafeLogger(options?: winston.LoggerOptions): winston.Logge
  * Safe logging functions that sanitize before output.
  */
 export const safeLog = {
-  info: (message: string, meta?: any) => {
+  info: (message: string, meta?: unknown) => {
     console.log(`[INFO] ${message}`, meta ? sanitizeForLogging(meta) : '');
   },
 
-  warn: (message: string, meta?: any) => {
+  warn: (message: string, meta?: unknown) => {
     console.warn(`[WARN] ${message}`, meta ? sanitizeForLogging(meta) : '');
   },
 
-  error: (message: string, meta?: any) => {
+  error: (message: string, meta?: unknown) => {
     console.error(`[ERROR] ${message}`, meta ? sanitizeForLogging(meta) : '');
   },
 
-  debug: (message: string, meta?: any) => {
+  debug: (message: string, meta?: unknown) => {
     if (process.env.DEBUG) {
       console.log(`[DEBUG] ${message}`, meta ? sanitizeForLogging(meta) : '');
     }

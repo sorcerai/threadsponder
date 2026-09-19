@@ -67,7 +67,7 @@ export interface FocusedPost {
   id: string;
   account_id: string;
   threads_account_id: string;
-  post_id: string;
+  threads_post_id: string;
   post_text: string | null;
   permalink_com: string | null;
   permalink_net: string | null;

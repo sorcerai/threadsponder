@@ -43,8 +43,8 @@ export default function Docs() {
       alert(`Ingested ${result.chunksIngested} chunks`);
       setUrlInput('');
       setUrlName('');
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err) {
+      alert('Error: ' + (err instanceof Error ? err.message : 'Unknown error'));
     }
   };
 
@@ -58,8 +58,8 @@ export default function Docs() {
       alert(`Ingested ${result.chunksIngested} chunks`);
       setTextContent('');
       setTextName('');
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err) {
+      alert('Error: ' + (err instanceof Error ? err.message : 'Unknown error'));
     }
   };
 
@@ -95,8 +95,8 @@ export default function Docs() {
       await uploadDocument.mutateAsync({ file });
       alert('Document uploaded! Processing will begin shortly.');
       if (fileInputRef.current) fileInputRef.current.value = '';
-    } catch (err: any) {
-      alert('Error: ' + err.message);
+    } catch (err) {
+      alert('Error: ' + (err instanceof Error ? err.message : 'Unknown error'));
     }
   };
 

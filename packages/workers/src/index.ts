@@ -8,9 +8,11 @@
 import cron from 'node-cron';
 import http from 'http';
 import { scheduleMonitoringJobs } from './jobs/reply-monitor.js';
+import { resumeHumanInference } from './jobs/human-resume.js';
 import { scheduleDuePosts } from './jobs/post-scheduler.js';
 import { scheduleMetricsJobs } from './jobs/metrics-collector.js';
 import { scheduleDiscoveryJobs } from './jobs/discovery.js';
+import { pruneOperatorQueues } from '@threadsponder/shared';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -36,6 +38,22 @@ cron.schedule('* * * * *', async () => {
     await scheduleMonitoringJobs();
   } catch (error) {
     console.error('[Scheduler] Reply monitor failed:', error);
+  }
+});
+
+// Human-inference resume — every minute, offset ~30s from the monitor tick.
+// Consumes answered inference rows and continues the reply workflow without
+// ever blocking the monitor. Only does work when HUMAN_INFERENCE_ENABLED is
+// on (claimAnsweredInference is a no-op scan otherwise).
+cron.schedule('* * * * *', async () => {
+  console.log('[Scheduler] Resuming human inference...');
+  try {
+    const { resumed, reaped } = await resumeHumanInference();
+    if (resumed > 0 || reaped > 0) {
+      console.log(`[Scheduler] Human resume: ${resumed} resumed, ${reaped} reaped`);
+    }
+  } catch (error) {
+    console.error('[Scheduler] Human resume failed:', error);
   }
 });
 
@@ -68,6 +86,17 @@ cron.schedule('*/5 * * * *', async () => {
 });
 
 console.log('[Workers] All cron jobs scheduled');
+
+// Operator-queue retention — daily; keeps answered/expired inference rows,
+// reviewed discovery candidates and decided replies from growing forever.
+cron.schedule('0 3 * * *', () => {
+  try {
+    const pruned = pruneOperatorQueues();
+    console.log('[Scheduler] Pruned operator queues:', JSON.stringify(pruned));
+  } catch (error) {
+    console.error('[Scheduler] Queue retention failed:', error);
+  }
+});
 
 // Graceful shutdown
 function shutdown() {

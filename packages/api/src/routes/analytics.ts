@@ -91,7 +91,7 @@ router.get('/replies', (req, res: Response) => {
 
     const db = getDb();
 
-    let whereClauses = ['account_id = ?'];
+    const whereClauses = ['account_id = ?'];
     const params: unknown[] = [accountId];
 
     if (classification) {

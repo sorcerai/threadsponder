@@ -10,7 +10,7 @@
 
 import { Request, Response, NextFunction, RequestHandler } from 'express';
 import cors, { CorsOptions } from 'cors';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { type Options as ExpressRateLimitOptions } from 'express-rate-limit';
 
 /**
  * Secure CORS configuration.
@@ -109,7 +109,10 @@ export function createRateLimiter(config: RateLimitConfig): RequestHandler {
   return rateLimit({
     windowMs,
     max: maxRequests,
-    keyGenerator: keyGenerator as any,
+    // The repo's express 5 Request type differs from the express 4 types
+    // express-rate-limit was built against; the signatures are identical
+    // at runtime, so this cast only bridges the type mismatch.
+    keyGenerator: keyGenerator as unknown as ExpressRateLimitOptions['keyGenerator'],
     standardHeaders: true,
     legacyHeaders: false,
     message: JSON.stringify({ error: message }),

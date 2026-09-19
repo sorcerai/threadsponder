@@ -43,7 +43,7 @@ function extractPostInfo(input: string): {
     };
   }
 
-  const comMatch = trimmed.match(/threads\.com\/@([^\/]+)\/post\/([A-Za-z0-9_-]+)/);
+  const comMatch = trimmed.match(/threads\.com\/@([^/]+)\/post\/([A-Za-z0-9_-]+)/);
   if (comMatch) {
     return {
       identifier: comMatch[2],

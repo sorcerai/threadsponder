@@ -12,7 +12,8 @@ Cron (every 1 min)
   -> Fetch new replies via Threads API
   -> Classify each reply (hostile / friendly / neutral)
   -> Generate voice-matched response via OpenRouter
-  -> Post reply via Threads API
+  -> Queue reply for human approval (`bin/human-queue`) — never auto-posted by default
+  -> Auto-post only with requireApproval=false AND THREADS_AUTO_POST=true (fail-closed)
   -> Record in reply_history
 ```
 
@@ -67,7 +68,7 @@ packages/
 
 ## Features
 
-- **Reply monitoring** — Auto-detect and respond to replies on focused posts
+- **Reply monitoring** — Auto-detect replies on focused posts; responses queue for human approval (`bin/human-queue`) and never auto-post unless the two-key system is explicitly enabled
 - **Voice training** — Teach the bot your tone with examples and document uploads
 - **Voice settings** — Tune formality, brevity, aggression, emoji usage
 - **Friends list** — Set banter/roast modes for specific usernames
@@ -111,6 +112,8 @@ SQLite schema is auto-created on first run. Key tables:
 | `Z_AI_API_KEY` | Faster classification via GLM-4.7 |
 | `RESEND_API_KEY` | Email notifications |
 | `THREADS_APP_ID` / `THREADS_APP_SECRET` | OAuth flow (alternative to manual token) |
+| `THREADS_AUTO_POST` | Must be `true` (together with per-account `requireApproval=false`) to auto-post replies; default queues for approval |
+| `HUMAN_INFERENCE_ENABLED` | Route all LLM calls to the human inference queue (`bin/human-queue answer`) |
 
 ## License
 

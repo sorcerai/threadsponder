@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useStats } from '@/hooks/useStats';
+import { useStats, type DashboardStats } from '@/hooks/useStats';
 import { useReplies } from '@/hooks/useReplies';
 import { useHourlyDistribution } from '@/hooks/useAnalytics';
 import { Button } from '@/components/ui/button';
@@ -192,10 +192,10 @@ export default function Dashboard() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ paused: !isPaused })
             });
-            queryClient.setQueryData(['stats'], (old: any) => ({
-                ...old,
-                status: !isPaused ? 'paused' : 'active'
-            }));
+            queryClient.setQueryData<DashboardStats>(['stats'], (old) => {
+                if (!old) return old;
+                return { ...old, status: !isPaused ? 'paused' : 'active' };
+            });
         } catch (e) {
             console.error(e);
         }
@@ -205,10 +205,10 @@ export default function Dashboard() {
         if (!confirm('Restart the agent? This will temporarily disconnect.')) return;
         try {
             await fetch('/api/restart', { method: 'POST' });
-            queryClient.setQueryData(['stats'], (old: any) => ({
-                ...old,
-                status: 'restarting'
-            }));
+            queryClient.setQueryData<DashboardStats>(['stats'], (old) => {
+                if (!old) return old;
+                return { ...old, status: 'restarting' };
+            });
         } catch (e) {
             console.error(e);
         }

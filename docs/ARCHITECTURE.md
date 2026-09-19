@@ -2,7 +2,7 @@
 
 ## What It Does
 
-Threadsponder monitors your Threads posts for replies, classifies each reply (hostile, friendly, neutral), generates a voice-matched response using AI, and posts it automatically. It also supports scheduled posts, voice training from uploaded documents, and bot-loop prevention.
+Threadsponder monitors your Threads posts for replies, classifies each reply (hostile, friendly, neutral), generates a voice-matched response using AI, and queues it for human approval — replies only post automatically when the two-key auto-post system (per-account `requireApproval=false` + `THREADS_AUTO_POST=true`) is explicitly enabled. It also supports scheduled posts, voice training from uploaded documents, and bot-loop prevention.
 
 ## System Overview
 
@@ -51,8 +51,12 @@ Background job processors. Runs BullMQ workers + cron schedulers.
 3. Classify reply (hostile/friendly/neutral) via fast classifier
 4. Run evaluator checks (bot loop, cooldown, blocklist) — fail open on errors
 5. Generate voice-matched response via OpenRouter
-6. Post reply via Threads API
+6. Queue reply in `pending_replies` for human approval (`bin/human-queue review` — records the decision only, never publishes). Auto-post only when per-account `requireApproval=false` AND `THREADS_AUTO_POST=true` are both set (fail-closed default)
 7. Track in reply_history + engagement metrics
+
+**Discovery** (every 5 min, opt-in per account via `automation_settings.discovery_enabled`): read-only search over configured queries; candidates land in `discovery_candidates` and never feed the reply monitor.
+
+**Operator-queue retention** (daily at 03:00): prunes answered/expired `pending_inference`, decided `pending_replies`, and reviewed `discovery_candidates`.
 
 **Post Scheduler** (every minute):
 1. Query `scheduled_posts` where `scheduled_for <= now` and `status = 'pending'`

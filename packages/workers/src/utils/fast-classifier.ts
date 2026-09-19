@@ -206,7 +206,7 @@ async function callGLMApi(
         confidence: result.confidence ?? 0.7,
         reasoning: result.reasoning ?? "No reasoning provided",
       };
-    } catch (e) {
+    } catch {
       logger.warn("Failed to parse JSON from GLM response");
       return null;
     }
@@ -352,16 +352,6 @@ export async function generateReplyFast(
       "cool. anyway.",
     ],
   };
-
-  const hostileInstructions =
-    classification === "hostile"
-      ? `\nRAGEBAIT RULES:
-- dunk with logic, not emotion
-- use 💀 or 🤔 for smirk energy
-- expose their hypocrisy if possible
-- never defensive, always on offense
-- make them look absurd with facts`
-      : "";
 
   // Use a simpler, more direct prompt that doesn't trigger reasoning mode
   const prompt = `Reply to this comment in 60 chars or less. lowercase. no explanation.
