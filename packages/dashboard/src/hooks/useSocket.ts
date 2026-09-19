@@ -9,7 +9,17 @@
  */
 
 // Create a no-op mock socket that matches the Socket interface
-const mockSocket = {
+interface MockSocket {
+    on: (...args: unknown[]) => MockSocket;
+    off: (...args: unknown[]) => MockSocket;
+    emit: (...args: unknown[]) => MockSocket;
+    connect: (...args: unknown[]) => MockSocket;
+    disconnect: (...args: unknown[]) => MockSocket;
+    connected: boolean;
+    id: string | undefined;
+}
+
+const mockSocket: MockSocket = {
     on: () => mockSocket,
     off: () => mockSocket,
     emit: () => mockSocket,
@@ -17,13 +27,13 @@ const mockSocket = {
     disconnect: () => mockSocket,
     connected: false,
     id: undefined,
-} as const;
+};
 
 export function useSocket() {
     // Return mock socket - real-time updates disabled for serverless
     // Dashboard uses React Query polling (60s intervals) instead
     return {
-        socket: mockSocket as any,
+        socket: mockSocket,
         isConnected: false
     };
 }

@@ -8,8 +8,7 @@ CREATE TABLE IF NOT EXISTS pending_inference (
   answer TEXT CHECK (answer IS NULL OR json_valid(answer)),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_inference_pending ON pending_inference(status, created_at);
-CREATE TABLE IF NOT EXISTS automation_settings (
+CREATE INDEX IF NOT EXISTS idx_inference_pending ON pending_inference(status, created_at);CREATE TABLE IF NOT EXISTS automation_settings (
   account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
   require_approval INTEGER NOT NULL DEFAULT 1 CHECK (require_approval IN (0, 1)),
   discovery_enabled INTEGER NOT NULL DEFAULT 0 CHECK (discovery_enabled IN (0, 1)),
@@ -37,4 +36,6 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(threads_account_id, threads_post_id)
 );
+CREATE INDEX IF NOT EXISTS idx_pending_replies_status ON pending_replies(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_status ON discovery_candidates(status, created_at);
 `;

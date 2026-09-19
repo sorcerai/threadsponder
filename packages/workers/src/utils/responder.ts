@@ -234,7 +234,7 @@ export async function generateResponse(
   const voiceExamplesPrompt = formatVoiceExamples(ctx.voiceExamples, ctx.classification);
 
   // Classification-specific instructions
-  let toneInstructions: Record<string, string> = {
+  const toneInstructions: Record<string, string> = {
     friendly: isFriend && friendMode === 'banter'
       ? 'This is a friend - be warm and genuinely engaged. Match their positive energy.'
       : 'Be appreciative and genuine. Keep it brief but warm.',

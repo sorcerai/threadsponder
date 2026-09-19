@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SpotlightCard } from '@/components/ui/spotlight-card';
 import { Button } from '@/components/ui/button';
@@ -143,13 +143,15 @@ export default function Character() {
   const [localCharacter, setLocalCharacter] = useState<CharacterConfig | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
 
-  // Sync local state when character loads
-  useEffect(() => {
-    if (character) {
-      setLocalCharacter(character);
-      setHasChanges(false);
-    }
-  }, [character]);
+  // Sync local state when a new character loads. Done during render
+  // (the React-endorsed "adjusting state when props change" pattern)
+  // instead of in an effect to avoid cascading renders.
+  const [prevCharacter, setPrevCharacter] = useState(character);
+  if (character && character !== prevCharacter) {
+    setPrevCharacter(character);
+    setLocalCharacter(character);
+    setHasChanges(false);
+  }
 
   // Helper to update local state
   const updateLocal = <K extends keyof CharacterConfig>(key: K, value: CharacterConfig[K]) => {

@@ -105,7 +105,7 @@ export function decryptCredential(ciphertext: string): string | null {
 
     const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
     return decrypted.toString('utf8');
-  } catch (error) {
+  } catch {
     // Don't log full error - could expose crypto details
     console.error('[ENCRYPTION] Decryption failed (invalid key or corrupted data)');
     return null;
@@ -119,7 +119,7 @@ export function decryptCredential(ciphertext: string): string | null {
  * @param credentials - Object with credential fields
  * @returns Object with encrypted sensitive fields
  */
-export function encryptCredentials(credentials: Record<string, any>): Record<string, any> {
+export function encryptCredentials(credentials: Record<string, unknown>): Record<string, unknown> {
   const sensitiveFields = [
     'openrouterApiKey',
     'threadsAccessToken',
@@ -153,7 +153,7 @@ export function encryptCredentials(credentials: Record<string, any>): Record<str
  * @param credentials - Object with encrypted credential fields
  * @returns Object with decrypted fields
  */
-export function decryptCredentials(credentials: Record<string, any>): Record<string, any> {
+export function decryptCredentials(credentials: Record<string, unknown>): Record<string, unknown> {
   const sensitiveFields = [
     'openrouterApiKey',
     'threadsAccessToken',
@@ -170,7 +170,7 @@ export function decryptCredentials(credentials: Record<string, any>): Record<str
 
   for (const field of sensitiveFields) {
     if (credentials[`${field}_encrypted`] && credentials[field]) {
-      const decryptedValue = decryptCredential(credentials[field]);
+      const decryptedValue = decryptCredential(credentials[field] as string);
       if (decryptedValue) {
         decrypted[field] = decryptedValue;
       } else {
@@ -190,7 +190,7 @@ export function decryptCredentials(credentials: Record<string, any>): Record<str
  * @param credentials - Object to check
  * @returns true if any sensitive field is encrypted
  */
-export function areCredentialsEncrypted(credentials: Record<string, any>): boolean {
+export function areCredentialsEncrypted(credentials: Record<string, unknown>): boolean {
   const encryptedFlags = [
     'openrouterApiKey_encrypted',
     'threadsAccessToken_encrypted',

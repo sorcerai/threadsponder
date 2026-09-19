@@ -133,7 +133,8 @@ Cron (every 1min)
   -> For each focused post, fetch new replies via Threads API
   -> Classify each reply (hostile / friendly / neutral)
   -> Generate voice-matched response via OpenRouter
-  -> Post reply via Threads API
+  -> Queue reply for human approval (bin/human-queue) — never auto-posted by default
+  -> Auto-post only with requireApproval=false AND THREADS_AUTO_POST=true (fail-closed)
   -> Record in reply_history
 ```
 
@@ -143,6 +144,7 @@ Cron (every 1min)
 |------|---------|
 | `packages/workers/src/index.ts` | Worker entry, cron scheduling |
 | `packages/workers/src/jobs/reply-monitor.ts` | Reply monitoring job |
+| `packages/workers/src/jobs/discovery.ts` | Read-only discovery job (feeds `discovery_candidates`) |
 | `packages/workers/src/jobs/post-scheduler.ts` | Scheduled post publishing |
 | `packages/workers/src/jobs/voice-processor.ts` | Document processing |
 | `packages/workers/src/jobs/metrics-collector.ts` | Post metrics snapshots |
@@ -158,6 +160,7 @@ Cron (every 1min)
 | Category | Tables |
 |----------|--------|
 | Core | `accounts`, `threads_accounts` (encrypted tokens) |
+| Human-in-the-loop | `pending_inference`, `pending_replies`, `discovery_candidates`, `automation_settings` |
 | Voice | `voice_examples` (embeddings as JSON), `voice_settings`, `voice_processing_queue` |
 | Content | `focused_posts`, `scheduled_posts`, `reply_history` |
 | Safety | `blocked_users`, `user_cooldowns`, `bot_loop_rates` |
@@ -175,6 +178,8 @@ Cron (every 1min)
 | `NODE_ENV` | No | Environment mode |
 | `DEFAULT_ORG_ID` | No | Org ID for local use (default: "default") |
 | `Z_AI_API_KEY` | No | Faster classification |
+| `THREADS_AUTO_POST` | No | Auto-post queued replies only when `true` AND per-account `requireApproval=false`; default is fail-closed (approval queue via `bin/human-queue`) |
+| `HUMAN_INFERENCE_ENABLED` | No | Route classification/response generation to the human inference queue |
 | `THREADS_ACCESS_TOKEN` | No* | Threads API token (auto-seeded on startup) |
 | `THREADS_USER_ID` | No* | Threads user ID (auto-seeded on startup) |
 | `THREADS_USERNAME` | No | Display name for your account |
@@ -198,4 +203,4 @@ pnpm clean         # Clean build artifacts
 3. **Add voice examples** — Train how your bot sounds (manual text or upload documents)
 4. **Adjust voice settings** — Tune formality, brevity, emoji usage, aggression sliders
 5. **Add friends** — Set banter/roast modes for specific usernames
-6. The reply monitor runs automatically every minute from there
+6. The reply monitor runs automatically every minute from there; generated replies queue for approval (`bin/human-queue`) and only auto-post when the two-key system is explicitly enabled

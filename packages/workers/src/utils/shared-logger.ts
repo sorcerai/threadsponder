@@ -14,7 +14,7 @@ class DashboardLogTransport extends winston.transports.Stream {
   constructor() {
     super({ stream: process.stdout });
   }
-  log(info: any, callback: () => void) {
+  log(info: { timestamp?: string; level: string; message?: unknown }, callback: () => void) {
     logBuffer.push({
       timestamp: info.timestamp || new Date().toISOString(),
       level: info.level,

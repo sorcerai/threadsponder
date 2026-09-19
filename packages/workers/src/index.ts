@@ -11,6 +11,7 @@ import { scheduleMonitoringJobs } from './jobs/reply-monitor.js';
 import { scheduleDuePosts } from './jobs/post-scheduler.js';
 import { scheduleMetricsJobs } from './jobs/metrics-collector.js';
 import { scheduleDiscoveryJobs } from './jobs/discovery.js';
+import { pruneOperatorQueues } from '@threadsponder/shared';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
@@ -68,6 +69,17 @@ cron.schedule('*/5 * * * *', async () => {
 });
 
 console.log('[Workers] All cron jobs scheduled');
+
+// Operator-queue retention — daily; keeps answered/expired inference rows,
+// reviewed discovery candidates and decided replies from growing forever.
+cron.schedule('0 3 * * *', () => {
+  try {
+    const pruned = pruneOperatorQueues();
+    console.log('[Scheduler] Pruned operator queues:', JSON.stringify(pruned));
+  } catch (error) {
+    console.error('[Scheduler] Queue retention failed:', error);
+  }
+});
 
 // Graceful shutdown
 function shutdown() {

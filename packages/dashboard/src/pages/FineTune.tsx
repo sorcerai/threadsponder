@@ -35,7 +35,7 @@ import {
 import { cn } from '@/lib/utils';
 
 export default function FineTune() {
-  const { data: statsData, isLoading: _statsLoading } = useFineTuneStats();
+  const { data: statsData } = useFineTuneStats();
   const { data: patternsData, isLoading: patternsLoading } = usePatternScores();
   const { data: repliesData, isLoading: repliesLoading, refetch: refetchReplies, isFetching: repliesFetching } = useUnratedReplies(10);
   const { data: freshData, isLoading: freshLoading, refetch: refetchFresh, isFetching: freshFetching } = useFreshHostile(20);
@@ -117,9 +117,9 @@ export default function FineTune() {
       if (result.success) {
         setAutoEvalResults(prev => ({ ...prev, [replyId]: result.scores }));
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Auto-eval failed:', error);
-      setAutoEvalErrors(prev => ({ ...prev, [replyId]: error.message || 'Evaluation failed' }));
+      setAutoEvalErrors(prev => ({ ...prev, [replyId]: error instanceof Error && error.message ? error.message : 'Evaluation failed' }));
     } finally {
       setAutoEvalInProgress(null);
     }

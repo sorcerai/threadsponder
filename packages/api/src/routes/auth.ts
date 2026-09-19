@@ -97,7 +97,7 @@ router.get("/threads/callback", async (req: Request, res: Response) => {
     const tokenData = (await tokenRes.json()) as {
       access_token?: string;
       user_id?: number | string;
-      error?: any;
+      error?: unknown;
     };
 
     if (!tokenData.access_token) {

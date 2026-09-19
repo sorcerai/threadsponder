@@ -2,6 +2,16 @@ import { getDb } from './sqlite.js';
 
 export type InferenceKind = 'classify' | 'respond';
 export const INFERENCE_TIMEOUT_MS = 240_000;
+/** Retention for answered/expired inference rows before deletion (default 30 days). */
+export const INFERENCE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Stable key-sorted JSON so idempotency checks don't depend on key order. */
+export function canonicalize(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalize((value as Record<string, unknown>)[k])}`).join(',')}}`;
+}
 
 export function validateAnswer(kind: InferenceKind, answer: unknown): string {
   if (!answer || typeof answer !== 'object') throw new Error('Answer must be a JSON object');
@@ -25,18 +35,26 @@ export function expireInference(): void {
     WHERE status = 'pending' AND created_at <= datetime('now', '-4 minutes')`).run();
 }
 
-export function submitAnswer(id: string, answer: unknown): string {
+export function submitAnswer(id: string | number, answer: unknown): string {
   expireInference();
   return getDb().transaction(() => {
     const row = getDb().prepare('SELECT kind, status, answer FROM pending_inference WHERE id = ?')
       .get(id) as { kind: InferenceKind; status: string; answer: string | null } | undefined;
     if (!row) throw new Error('Inference not found; run human-queue list');
     validateAnswer(row.kind, answer);
-    const json = JSON.stringify(answer);
-    if (row.status === 'answered' && row.answer === json) return 'already answered';
+    const json = canonicalize(answer);
+    if (row.status === 'answered' && row.answer !== null && canonicalize(JSON.parse(row.answer)) === json) {
+      return 'already answered';
+    }
     if (row.status !== 'pending') throw new Error(`Inference is ${row.status}; run human-queue list`);
-    getDb().prepare("UPDATE pending_inference SET status = 'answered', answer = ? WHERE id = ? AND status = 'pending'")
+    const result = getDb().prepare("UPDATE pending_inference SET status = 'answered', answer = ? WHERE id = ? AND status = 'pending'")
       .run(json, id);
+    if (result.changes === 0) {
+      // Lost the race: another process answered or expired the row between read and update.
+      const fresh = getDb().prepare('SELECT status FROM pending_inference WHERE id = ?')
+        .get(id) as { status: string } | undefined;
+      throw new Error(`Inference is ${fresh?.status ?? 'gone'}; run human-queue list`);
+    }
     return 'answered';
   })();
 }
@@ -59,4 +77,23 @@ export async function waitForHuman(kind: InferenceKind, payload: unknown): Promi
     }
     await new Promise(resolve => setTimeout(resolve, 5000));
   }
+}
+
+/**
+ * Retention cleanup: delete answered/expired inference rows, pending_replies and
+ * discovery_candidates older than their retention windows. Without this the
+ * operator queues grow forever (payloads contain raw social text and prompts).
+ */
+export function pruneOperatorQueues(retentionMs: number = INFERENCE_RETENTION_MS): {
+  inference: number; replies: number; discovery: number;
+} {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - retentionMs).toISOString().slice(0, 19).replace('T', ' ');
+  const inference = db.prepare(
+    `DELETE FROM pending_inference WHERE status IN ('answered', 'expired') AND created_at < ?`).run(cutoff).changes;
+  const replies = db.prepare(
+    `DELETE FROM pending_replies WHERE status IN ('approved', 'rejected') AND created_at < ?`).run(cutoff).changes;
+  const discovery = db.prepare(
+    `DELETE FROM discovery_candidates WHERE status IN ('reviewed', 'rejected') AND created_at < ?`).run(cutoff).changes;
+  return { inference, replies, discovery };
 }

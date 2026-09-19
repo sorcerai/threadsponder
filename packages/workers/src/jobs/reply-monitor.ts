@@ -8,7 +8,7 @@
  * 4. Records history for analytics
  */
 
-import { ThreadsClient, ClassificationType, getDb } from '@threadsponder/shared';
+import { ThreadsClient, ClassificationType, getDb, VoiceSettings, VoiceExample, Friend } from '@threadsponder/shared';
 import { getTenantService } from '../services/tenant.js';
 import { classifyReply, Classification } from '../utils/classifier.js';
 import { generateResponse, ResponseContext } from '../utils/responder.js';
@@ -97,9 +97,9 @@ export async function processReply(
     ownUsername: string | null;
     client: ThreadsClient;
     parentPost: { id: string; text: string };
-    voiceSettings: any;
-    voiceExamples: any[];
-    friends: any[];
+    voiceSettings: VoiceSettings | null;
+    voiceExamples: VoiceExample[];
+    friends: Friend[];
     targetClassifications?: string[];
   },
   reply: { id: string; text: string; username: string; timestamp?: string; mediaType?: string }
@@ -190,6 +190,8 @@ export async function processReply(
     voiceSettings: ctx.voiceSettings,
     voiceExamples: ctx.voiceExamples,
     friends: ctx.friends,
+    isMetaComment: classificationResult.isMetaComment,
+    confidence: classificationResult.confidence,
   };
 
   const generatedResponse = await generateResponse(responseCtx, OPENROUTER_API_KEY);
@@ -217,13 +219,22 @@ export async function processReply(
     response: generatedResponse.reply,
   };
 
-  if (ctx.requireApproval !== false) {
-    getDb().prepare(`INSERT OR IGNORE INTO pending_replies
+  // Auto-post is a two-key system: the DB setting alone is never enough.
+  // requireApproval=false must be paired with THREADS_AUTO_POST=true or the
+  // reply still goes to the approval queue. Default is always fail-closed.
+  const autoPost = ctx.requireApproval === false && process.env.THREADS_AUTO_POST === 'true';
+  if (!autoPost) {
+    const queued = getDb().prepare(`INSERT OR IGNORE INTO pending_replies
       (account_id, threads_account_id, threads_reply_id, payload, response)
       VALUES (?, ?, ?, ?, ?)`).run(ctx.accountId, ctx.threadsAccountId, reply.id,
         JSON.stringify({ parentPost: ctx.parentPost, reply, classification: classificationResult }), generatedResponse.reply);
+    if (queued.changes === 0) {
+      console.log(`[Monitor] Reply ${reply.id} already queued (concurrent worker raced here)`);
+    }
     return { ...base, posted: false, postId: null };
   }
+
+  console.warn(`[Monitor] AUTO-POST ENGAGED for @${reply.username} (requireApproval=false + THREADS_AUTO_POST=true)`);
 
   try {
     const posted = await ctx.client.replyToPost(reply.id, generatedResponse.reply);
@@ -306,8 +317,7 @@ async function monitorAccount(
   let totalPosted = 0;
 
   for (const focusedPost of focusedPosts) {
-    // SQLite column name differs from the shared type's `post_id` field
-    const postId = (focusedPost as any).threads_post_id as string;
+    const postId = focusedPost.threads_post_id;
     const postText = focusedPost.post_text || '';
     const parentPost = { id: postId, text: postText };
 

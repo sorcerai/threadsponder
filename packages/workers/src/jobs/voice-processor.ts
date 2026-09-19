@@ -19,7 +19,10 @@ import {
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 
 // Chonkie chunker instance (lazy-loaded)
-let chunkerInstance: any = null;
+interface ChonkieChunker {
+  chunk: (text: string) => Promise<Array<{ text?: string } | string>>;
+}
+let chunkerInstance: ChonkieChunker | null = null;
 
 /**
  * Get or create Chonkie sentence chunker
@@ -43,7 +46,7 @@ async function chunkTextWithChonkie(text: string): Promise<string[]> {
   try {
     const chunker = await getChunker();
     const chunks = await chunker.chunk(text);
-    return chunks.map((c: any) => c.text || c);
+    return chunks.map((c) => (typeof c === 'string' ? c : c.text || ''));
   } catch (error) {
     console.warn('[VoiceProcessor] Chonkie failed, using fallback:', error);
     return text
@@ -67,8 +70,9 @@ async function extractText(content: ArrayBuffer, filename: string): Promise<stri
       return new TextDecoder().decode(content);
 
     case 'pdf': {
-      const pdfParse = await import('pdf-parse');
-      const parser = (pdfParse as any).default || pdfParse;
+      type PdfParse = (buffer: Buffer) => Promise<{ text: string }>;
+      const pdfModule = (await import('pdf-parse')) as unknown as { default?: PdfParse } & PdfParse;
+      const parser: PdfParse = pdfModule.default ?? pdfModule;
       const pdfData = await parser(buffer);
       return pdfData.text;
     }

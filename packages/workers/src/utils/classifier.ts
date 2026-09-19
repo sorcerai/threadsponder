@@ -5,7 +5,6 @@
  * Detects: friendly, neutral, hostile + injection attempts
  */
 
-import type { ReplyHistory } from '@threadsponder/shared';
 import { generateWithFallback, isHumanEnabled } from './llm-provider.js';
 
 // OpenRouter config

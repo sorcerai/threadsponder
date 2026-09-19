@@ -31,7 +31,7 @@ interface AchievementStats {
     recentDays: DailyStats[];
 }
 
-interface DashboardStats {
+export interface DashboardStats {
     status: string;
     uptime: number;
     repliesHandled: number;
