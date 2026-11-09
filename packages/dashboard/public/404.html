@@ -7,56 +7,188 @@
   <meta name="robots" content="noindex">
   <link rel="icon" type="image/svg+xml" href="/vite.svg">
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* Styles copied from the homepage (index.html) so the 404 matches it. */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
       background: #0a0a0a;
-      background-image: radial-gradient(ellipse at top, rgba(168, 85, 247, 0.08) 0%, transparent 50%);
-      background-repeat: no-repeat;
       min-height: 100vh;
       display: flex;
-      align-items: center;
-      justify-content: center;
+      flex-direction: column;
       color: #fff;
     }
 
-    .container { text-align: center; padding: 2rem; max-width: 700px; }
+    main {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
 
-    .code {
+    .container {
+      text-align: center;
+      padding: 2rem;
+      max-width: 700px;
+      animation: fadeIn 1s ease-out;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .thread {
+      display: block;
+      margin: 0 auto 1.5rem;
+    }
+
+    .headline {
+      font-size: 3.5rem;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+      line-height: 1.1;
+    }
+
+    .headline .highlight {
+      color: #a855f7;
+    }
+
+    .coming-soon + .headline {
+      margin-top: 1.5rem;
+    }
+
+    .tagline {
+      font-size: 1.25rem;
+      color: #9ca3af;
+      margin-bottom: 2.5rem;
+      font-weight: 400;
+      line-height: 1.6;
+      max-width: 550px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .cta-button {
+      display: inline-block;
+      background: #a855f7;
+      color: #fff;
+      padding: 1rem 2.5rem;
+      border-radius: 100px;
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s;
+      border: 1px solid #a855f7;
+    }
+
+    .cta-button:hover {
+      background: #9333ea;
+      transform: translateY(-2px);
+      box-shadow: 0 10px 30px rgba(168, 85, 247, 0.3);
+    }
+
+    .cta-button.secondary {
+      background: transparent;
+      border-color: rgba(168, 85, 247, 0.5);
+    }
+
+    .cta-button.secondary:hover {
+      background: rgba(168, 85, 247, 0.15);
+      border-color: #a855f7;
+    }
+
+    .cta-button:focus-visible {
+      outline: 2px solid #fff;
+      outline-offset: 3px;
+    }
+
+    .coming-soon {
+      display: inline-block;
+      background: rgba(168, 85, 247, 0.15);
+      border: 1px solid rgba(168, 85, 247, 0.3);
+      padding: 0.5rem 1.5rem;
+      border-radius: 100px;
       font-size: 0.75rem;
       font-weight: 600;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: #a855f7;
-      margin-bottom: 1rem;
     }
 
-    h1 { font-size: 2.5rem; font-weight: 700; line-height: 1.1; margin-bottom: 1rem; }
-
-    p { font-size: 1.125rem; color: #9ca3af; line-height: 1.6; margin-bottom: 2rem; }
-
-    a {
-      display: inline-block;
-      background: #a855f7;
-      color: #fff;
-      padding: 0.875rem 2.25rem;
-      border-radius: 100px;
-      font-size: 1rem;
-      font-weight: 600;
-      text-decoration: none;
-      transition: background 0.2s;
+    .footer {
+      padding: 1.5rem;
+      color: #6b7280;
+      font-size: 0.875rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
 
-    a:hover { background: #9333ea; }
+    /* Subtle gradient overlay */
+    .bg-gradient {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: -1;
+      background: radial-gradient(ellipse at top, rgba(168, 85, 247, 0.08) 0%, transparent 50%);
+    }
+
+    @media (max-width: 640px) {
+      .headline { font-size: 2.5rem; }
+      .tagline { font-size: 1rem; }
+      .footer {
+        flex-direction: column;
+        gap: 1rem;
+        text-align: center;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .container { animation: none; }
+      .cta-button { transition: none; }
+      .cta-button:hover { transform: none; }
+    }
   </style>
 </head>
 <body>
-  <main class="container">
-    <div class="code">404</div>
-    <h1>Page not found</h1>
-    <p>That page does not exist on Threadsponder.</p>
-    <a href="/">Back to home</a>
+  <div class="bg-gradient"></div>
+
+  <main>
+    <div class="container">
+      <svg class="thread" width="32" height="128" viewBox="0 0 24 96" fill="none" aria-hidden="true">
+        <line x1="12" y1="8" x2="12" y2="52" stroke="#a855f7" stroke-width="2" stroke-linecap="round"/>
+        <line x1="12" y1="52" x2="12" y2="88" stroke="#a855f7" stroke-opacity=".5" stroke-width="2" stroke-linecap="round" stroke-dasharray="2 8"/>
+        <circle cx="12" cy="8" r="5" fill="#a855f7"/>
+        <circle cx="12" cy="30" r="4" fill="#a855f7" fill-opacity=".6"/>
+        <circle cx="12" cy="52" r="3" fill="#a855f7" fill-opacity=".3"/>
+      </svg>
+      <div class="coming-soon">Error 404</div>
+      <h1 class="headline">This thread <span class="highlight">went quiet.</span></h1>
+      <p class="tagline">That page doesn't exist or has moved. Threadsponder is still coming soon, and the waitlist is open.</p>
+      <div class="actions">
+        <a href="/" class="cta-button">Back to home</a>
+        <a href="https://waitlist.threadsponder.com/" class="cta-button secondary">Join Waitlist</a>
+      </div>
+    </div>
   </main>
+
+  <footer class="footer">
+    <p>&copy; 2026 Threadsponder. All rights reserved.</p>
+  </footer>
 </body>
 </html>
